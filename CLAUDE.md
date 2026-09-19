@@ -4,8 +4,16 @@
 
 Apps designed specifically for the iPhone Duo (foldable, announced 2026-09-09,
 ships 2026-10-23, iOS 27). One folder per app, each a self-contained Xcode
-project. Current app: `FaceToFaceCaption/` (display name **Across**) — live
-face-to-face speech captioning and translation.
+project. Apps:
+
+- `FaceToFaceCaption/` (display name **Across**) — live face-to-face speech
+  captioning and translation.
+- `DuoStudio/` (display name **Duo Studio**) — pose-guided photo camera. The
+  camera facing the subject shows them a mirrored live preview, a pose
+  template, and their live skeleton on the Duo's outer display via
+  `CameraCaptureAccessory`; the subject steers filter/zoom/exposure via hand
+  gestures since the outer display has no touch. Also has a self-portrait
+  mode (tripod + front camera) that works on any iPhone.
 
 ## Stack
 

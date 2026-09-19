@@ -1,0 +1,59 @@
+# DuoStudio — native SwiftUI iPhone app (display name "Duo Studio").
+#
+# XcodeGen generates the .xcodeproj from this file — never hand-edit the generated project.
+# `PoseCore` is a platform-neutral SwiftPM package (pure logic + its own tests, no
+# UIKit/SwiftUI/Vision/CoreGraphics imports) so pose matching, hand-gesture classification, and
+# studio state can be unit tested without a simulator.
+#
+# Requires Xcode 27.1 beta (iOS 27.1 SDK): the app sources reference `.sceneAccessory` /
+# `CameraCaptureAccessory` and `AVCaptureDeviceDirectionCoordinator`, gated behind
+# `if #available(iOS 27.1, *)` everywhere they're used, with a non-Duo fallback path.
+#
+# UNVERIFIED (2026-09-20): written on Windows with no Xcode/xcodegen toolchain to verify against —
+# confirm on a Mac that `xcodegen generate` produces a working project and that it builds & runs.
+name: DuoStudio
+options:
+  bundleIdPrefix: tech.kioh
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+configs:
+  Debug: debug
+  Release: release
+packages:
+  PoseCore:
+    path: PoseCore
+targets:
+  DuoStudio:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Sources
+      - path: Resources
+        excludes:
+          - Info.plist
+          - Assets.xcassets
+      - path: Resources/Assets.xcassets
+    settings:
+      base:
+        INFOPLIST_FILE: Resources/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: tech.kioh.duostudio
+        PRODUCT_NAME: DuoStudio
+        IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: NO
+    dependencies:
+      - package: PoseCore
+        product: PoseCore
+schemes:
+  DuoStudio:
+    build:
+      targets:
+        DuoStudio: all
+    run:
+      config: Debug
