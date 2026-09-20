@@ -9,12 +9,16 @@
 # `CameraCaptureAccessory`, gated behind `if #available(iOS 27.1, *)` everywhere it's used, with a
 # non-Duo fallback path.
 #
-# `DUO_DIRECTION_COORDINATOR` (Swift compiler flag, OFF by default — not set anywhere in this
-# file): guards the real `AVCaptureDeviceDirectionCoordinator` integration in
-# `Sources/Views/CameraDirectionAnchor.swift`. Off, the app always falls back to the classic
-# wide-angle front/back cameras. Turn it on (e.g. `OTHER_SWIFT_FLAGS: -DDUO_DIRECTION_COORDINATOR`
-# under a target's `settings`) only after confirming the coordinator's shape on a Mac with Xcode
-# 27.1 — see backlog.md.
+# `DUO_DIRECTION_COORDINATOR` (Swift compiler flag) is ON by default via
+# `SWIFT_ACTIVE_COMPILATION_CONDITIONS` below — it guards the real
+# `AVCaptureDeviceDirectionCoordinator` integration in `Sources/Views/CameraDirectionAnchor.swift`,
+# still nested inside `if #available(iOS 27.1, *)`, so non-Duo/pre-27.1 devices always fall back to
+# the classic wide-angle front/back cameras.
+#
+# Building with Xcode 26 (iOS 26 SDK) instead of 27.1: remove `DUO_DIRECTION_COORDINATOR` from
+# `SWIFT_ACTIVE_COMPILATION_CONDITIONS` below AND the `sceneAccessory`/`CameraCaptureAccessory`
+# usage in `Sources/Views/OuterDisplayAccessory.swift` — both are 27.x-only APIs and Xcode 26 can't
+# even parse them behind `#if`/`#available` alone (the symbols themselves don't exist in that SDK).
 #
 # UNVERIFIED (2026-09-20): written on Windows with no Xcode/xcodegen toolchain to verify against —
 # confirm on a Mac that `xcodegen generate` produces a working project and that it builds & runs.
@@ -50,6 +54,7 @@ targets:
         IPHONEOS_DEPLOYMENT_TARGET: "26.0"
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) DUO_DIRECTION_COORDINATOR"
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

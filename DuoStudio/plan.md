@@ -150,10 +150,14 @@ about which side of the Duo it's on, so it can't live inside `CameraService` (wh
 `AVCaptureDeviceDirectionCoordinator(view:deviceTypes:changeHandler:)` with that hosting view and
 `[.builtInOuterUltraWideCamera, .builtInInnerUltraWideCamera, .builtInDualWideCamera]`, and keeps it
 alive as a stored property (a local `let` would be deallocated, and its change handler with it,
-before it could ever fire). The change handler receives an `AVCaptureDeviceDirectionMap` with
-`forwardFacingDeviceDescriptors`/`backwardFacingDeviceDescriptors` (forward = facing the same view
-the photographer looks at); each descriptor's `uniqueID` (UNVERIFIED) is forwarded through
-`StudioModel.updateCameraDirections(forwardIDs:backwardIDs:)` to
+before it could ever fire). Right after creating it, `start(view:model:)` also reads
+`coordinator.deviceDirections` once, synchronously, and pushes that initial state through
+`StudioModel.updateCameraDirections(forwardIDs:backwardIDs:)` the same way the change handler does
+— so the right camera is picked from the first frame instead of waiting for the first
+`changeHandler` call. The change handler (and that initial read) both work off an
+`AVCaptureDeviceDirectionMap` with `forwardFacingDeviceDescriptors`/`backwardFacingDeviceDescriptors`
+(forward = facing the same view the photographer looks at); each descriptor's `uniqueID` is
+forwarded through `StudioModel.updateCameraDirections(forwardIDs:backwardIDs:)` to
 `CameraService.setDirectionalDevices(forwardIDs:backwardIDs:)` (sessionQueue-confined storage, then
 `reconfigureInput()` if the session is already configured). `selectDevice(for:)` resolves the first
 ID for the mode (`.partner` → backward, `.selfPortrait` → forward) via `AVCaptureDevice
@@ -161,9 +165,10 @@ ID for the mode (`.partner` → backward, `.selfPortrait` → forward) via `AVCa
 no IDs yet.
 
 The whole coordinator implementation is compiled only under the `DUO_DIRECTION_COORDINATOR` Swift
-flag (documented, but **not** set, in `project.yml`), nested inside `if #available(iOS 27.1, *)` —
-so the flag is off by default and a first Mac build can't fail on an API that's never been checked
-against the real SDK. Turning it on is tracked in `backlog.md`.
+flag, nested inside `if #available(iOS 27.1, *)`. The flag is now **on by default**
+(`SWIFT_ACTIVE_COMPILATION_CONDITIONS` in `project.yml`) now that its shape is confirmed against
+Apple's published docs — see Verification status below. What's left is verifying the coordinator's
+real behavior on hardware/simulator, tracked in `backlog.md`.
 
 ## Privacy
 
@@ -180,13 +185,17 @@ group in `project.yml`, so XcodeGen picks it up as a plain resource alongside `I
 
 ## Verification status
 
-Every row below is **UNVERIFIED — written on Windows, 2026-09-20.** No Mac/Xcode/Swift toolchain
-was available to compile or run any of this.
+Rows below marked **confirmed against published docs (2026-09-20)** have had their Swift API
+signatures checked against Apple's developer documentation. That confirms the shape of the call —
+it does not confirm real-hardware/Duo-simulator *behavior*, which stays unverified until this runs
+on a Mac with Xcode 27.1. Everything else is still **UNVERIFIED — written on Windows, 2026-09-20**;
+no Mac/Xcode/Swift toolchain was available to compile or run any of this.
 
 | API | Used for | Status | Source |
 |---|---|---|---|
-| `.sceneAccessory` / `CameraCaptureAccessory` | Outer display in Partner mode | Unverified — iOS 27.1 SDK not yet released | Tech Talk 111464 — https://developer.apple.com/videos/play/tech-talks/111464/ |
-| `AVCaptureDeviceDirectionCoordinator(view:deviceTypes:changeHandler:)`, `AVCaptureDeviceDirectionMap.forwardFacingDeviceDescriptors`/`backwardFacingDeviceDescriptors`, `AVCaptureDeviceDescriptor.uniqueID` | Picking the subject-facing (Partner) or user-facing (self-portrait) camera on the Duo | Unverified — gated behind `DUO_DIRECTION_COORDINATOR` (off), not compiled into the default build | Tech Talk 111465 — https://developer.apple.com/videos/play/tech-talks/111465/ |
+| `View.sceneAccessory(content:)`, `SceneAccessoryContent.onAvailabilityChange(perform:)` | Outer display in Partner mode | Confirmed against published docs (2026-09-20) — real-hardware/simulator behavior still unverified | https://developer.apple.com/documentation/swiftui/view/sceneaccessory(content:) |
+| `CameraCaptureAccessory<Content>` (`init(content:)`, `init(isEnabled:content:)`) | Outer display in Partner mode | Confirmed against published docs (2026-09-20) — real-hardware/simulator behavior still unverified | https://developer.apple.com/documentation/swiftui/cameracaptureaccessory |
+| `AVCaptureDeviceDirectionCoordinator(view:deviceTypes:changeHandler:)`, `deviceDirections`, `AVCaptureDeviceDirectionMap.forwardFacingDeviceDescriptors`/`backwardFacingDeviceDescriptors`, `AVCaptureDeviceDescriptor.uniqueID` | Picking the subject-facing (Partner) or user-facing (self-portrait) camera on the Duo; `deviceDirections` is also read once right after creating the coordinator so the initial pick doesn't wait for the first `changeHandler` call | Confirmed against published docs (2026-09-20); `DUO_DIRECTION_COORDINATOR` is on by default — whether the subject-facing camera is really the backward-facing descriptor in partner mode on real hardware is still unverified | https://developer.apple.com/documentation/avkit/avcapturedevicedirectioncoordinator |
 | `AVCaptureDevice.RotationCoordinator(device:previewLayer:)`, `videoRotationAngleForHorizonLevelCapture`, `AVCaptureConnection.videoRotationAngle`/`isVideoMirrored` | Upright, un-mirrored live preview + horizon-correct photo capture | Unverified — documented iOS 17+ API, but exact behavior on Duo hardware not checked from Windows | Not checked from Windows |
 | Camera-only dual-display behavior; outer display takes no touch | Confirms the non-interactive `SubjectView` design and that only `CameraCaptureAccessory` (not a general window) targets the outer display | Unverified — third-party notes, not Apple docs | Group Labs Q&A — https://gist.github.com/frankschlegel/6356a059426b2393528691822edfdae6 |
 | `.onCameraCaptureEvent` (AVKit, iOS 18+) | Remote shutter (volume buttons / Camera Control / Bluetooth remote) in both capture modes | Unverified — signature/availability not checked against real docs from Windows | Not checked from Windows |
