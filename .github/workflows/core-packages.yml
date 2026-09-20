@@ -17,7 +17,7 @@ jobs:
     name: Core package (${{ matrix.package-path }})
     runs-on: macos-latest
     strategy:
-      fail-fast: false
+      fail-fast: false # one package failing shouldn't cancel the other job
       matrix:
         package-path:
           - FaceToFaceCaption/CaptionCore
