@@ -1,0 +1,33 @@
+# Platform-neutral cores only — the iOS app targets need Xcode 27.1 and a Mac, so they aren't built here.
+name: Core packages
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Core package (${{ matrix.package-path }})
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        package-path:
+          - FaceToFaceCaption/CaptionCore
+          - DuoStudio/PoseCore
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Print Swift version
+        run: swift --version
+
+      - name: Print Xcode version
+        run: xcodebuild -version
+
+      - name: Build ${{ matrix.package-path }}
+        continue-on-error: false
+        run: swift build --package-path ${{ matrix.package-path }}
+
+      - name: Test ${{ matrix.package-path }}
+        continue-on-error: false
+        run: swift test --package-path ${{ matrix.package-path }}
