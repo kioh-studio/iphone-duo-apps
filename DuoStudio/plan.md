@@ -192,6 +192,46 @@ was available to compile or run any of this.
 | `.onCameraCaptureEvent` (AVKit, iOS 18+) | Remote shutter (volume buttons / Camera Control / Bluetooth remote) in both capture modes | Unverified — signature/availability not checked against real docs from Windows | Not checked from Windows |
 | `VNDetectHumanBodyPoseRequest` / `VNDetectHumanHandPoseRequest` joint names and confidence semantics | Converting Vision output into `PoseCore.Pose` / hand joints | Unverified | Not checked from Windows |
 
+## Simulator
+
+The iOS Simulator has no camera: without a fake source, the app would show a black preview and
+none of the pose/gesture UI could be exercised. `CaptureSource` (`Sources/Services/CaptureSource
+.swift`) is the protocol `StudioModel` drives instead of talking to `CameraService` directly
+(`start`/`stop`/`apply`/`setMode`/`capturePhoto`) — `CameraService` conforms to it, and
+`Sources/Services/SimulatedFrameSource.swift` (whole file gated behind
+`#if targetEnvironment(simulator)`) is a second conformer built for the Simulator. `StudioModel`
+picks between them in `init()` with the same flag; `setDirectionalDevices` stays off the protocol
+and `CameraService`-only, since it means nothing without a real, physical Duo.
+
+`SimulatedFrameSource` runs a `DispatchSourceTimer` on its own private serial queue, ~10 Hz, and
+feeds `StudioModel.receive(_:)` the same way `FrameProcessor` does (a `@MainActor` hop):
+
+- **Image**: a soft vertical gradient (mirroring `Theme.Palette.paper`/`paper3`'s OKLCH values,
+  reused directly via `PoseCore.OKLCH` since a Service can't import SwiftUI's `Theme`) plus a stick
+  figure drawn from the current pose, rendered into a `CGContext` and then run through the same
+  filter + contrast `CIImage` pipeline `FrameProcessor` uses, so switching filters is visibly
+  testable.
+- **Pose**: `PoseLibrary.builtIn[0]`, perturbed continuously (wrists/elbows on a slow sine, the
+  whole figure drifting a little) so the match % moves instead of sitting constant. The same
+  perturbed pose is what gets drawn into the image, so the skeleton overlay lines up with the
+  figure underneath it.
+- **Hand**: a canned gesture script looping every ~16 s — idle → open-palm swipe (fires a filter
+  change) → growing pinch (fires zoom) → held fist (~1 s, next parameter) → held pointUp (~1.5 s,
+  adjust up) → held pointDown (~1.5 s, adjust down) → idle — feeding real `HandSample` values
+  through the *existing* `GestureRecognizer` (`StudioModel.receive(_:)` already owns that call;
+  the simulated source never calls it directly), so every gesture path gets exercised.
+- **Capture**: `capturePhoto()` JPEG-encodes the last drawn (post-filter) image via
+  `CIContext.jpegRepresentation`, so the `PhotoWriter`/Photos-permission path also runs.
+
+**What this proves**: the full `StudioModel` → `SkeletonOverlay`/`SubjectView` → gesture → filter/
+capture UI path, end to end, without hardware.
+
+**What this does NOT prove**: nothing about Vision's real accuracy (there's no `VNDetectHuman*
+PoseRequest` call anywhere in this path — the "detection" is just handed over pre-classified),
+nothing about a real camera's behavior (exposure/white-balance/rotation/mirroring, multi-camera
+selection), and nothing about the Duo's outer display or direction coordinator specifically — see
+`backlog.md` for the real-device verification this still owes.
+
 ## Out of scope
 
 See root `backlog.md` for everything deferred: Mac build verification, on-device hand-gesture

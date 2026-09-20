@@ -35,8 +35,19 @@ final class StudioModel {
 
     // MARK: - Camera / pipeline
 
+    #if targetEnvironment(simulator)
+    /// The Simulator has no camera — `SimulatedFrameSource` feeds `receive(_:)` a synthetic
+    /// frame/pose/gesture stream instead. See `DuoStudio/plan.md`'s Simulator section for what
+    /// this does and doesn't prove.
+    private let simulatedSource: SimulatedFrameSource
+    #else
     private let frameProcessor = FrameProcessor()
     private let camera: CameraService
+    #endif
+    /// `captureSource` (not `capture`, to avoid colliding with the `capture()` method below) is
+    /// either `camera` or `simulatedSource`, type-erased to the operations both share — see
+    /// `CaptureSource`.
+    private let captureSource: any CaptureSource
     private var recognizer = GestureRecognizer()
 
     var cameraAuthorization: CameraAuthorization = .unknown
@@ -78,7 +89,7 @@ final class StudioModel {
             } else {
                 isOuterEnabled = true
             }
-            camera.setMode(captureMode)
+            captureSource.setMode(captureMode)
         }
     }
 
@@ -113,29 +124,51 @@ final class StudioModel {
 
         captureMode = defaults.string(forKey: Self.captureModeKey).flatMap(CaptureMode.init(rawValue:)) ?? .partner
 
-        camera = CameraService(frameProcessor: frameProcessor)
-        // `didSet` doesn't fire for the assignment above, so the camera needs to be told the
-        // loaded mode explicitly.
-        camera.setMode(captureMode)
+        #if targetEnvironment(simulator)
+        let source = SimulatedFrameSource()
+        simulatedSource = source
+        captureSource = source
+        #else
+        let cameraService = CameraService(frameProcessor: frameProcessor)
+        camera = cameraService
+        captureSource = cameraService
+        #endif
+        // `didSet` doesn't fire for the assignment above, so the capture source needs to be told
+        // the loaded mode explicitly.
+        captureSource.setMode(captureMode)
+        #if targetEnvironment(simulator)
+        simulatedSource.model = self
+        #else
         frameProcessor.model = self
+        #endif
     }
 
     // MARK: - Lifecycle
 
     func requestCameraAccess() async {
+        #if targetEnvironment(simulator)
+        // No AVFoundation permission prompt makes sense against a synthetic source — the
+        // Simulator has no camera to authorize in the first place.
+        cameraAuthorization = .authorized
+        captureSource.start()
+        #else
         let granted = await CameraService.requestAuthorization()
         cameraAuthorization = granted ? .authorized : .denied
-        if granted { camera.start() }
+        if granted { captureSource.start() }
+        #endif
     }
 
     func stop() {
-        camera.stop()
+        captureSource.stop()
     }
 
     /// Forwarded from `CameraDirectionAnchor`'s coordinator change handler (`DUO_DIRECTION_COORDINATOR`
-    /// builds only) whenever the Duo's forward/backward-facing devices change.
+    /// builds only) whenever the Duo's forward/backward-facing devices change. No-op in the
+    /// Simulator, which has neither a direction coordinator nor a real camera to route these IDs to.
     func updateCameraDirections(forwardIDs: [String], backwardIDs: [String]) {
+        #if !targetEnvironment(simulator)
         camera.setDirectionalDevices(forwardIDs: forwardIDs, backwardIDs: backwardIDs)
+        #endif
     }
 
     // MARK: - Frame ingestion
@@ -170,8 +203,12 @@ final class StudioModel {
     }
 
     private func finishStateChange(_ toast: GestureToast) {
-        camera.apply(state.adjustments)
+        captureSource.apply(state.adjustments)
+        #if targetEnvironment(simulator)
+        simulatedSource.updateFilter(state.filter, contrast: state.adjustments.contrast)
+        #else
         frameProcessor.updateFilter(state.filter, contrast: state.adjustments.contrast)
+        #endif
         lastGesture = toast
         scheduleGestureClear()
     }
@@ -261,7 +298,7 @@ final class StudioModel {
         flashTrigger += 1
         defer { isCapturing = false }
         do {
-            let data = try await camera.capturePhoto()
+            let data = try await captureSource.capturePhoto()
             try await PhotoWriter.write(data, filter: state.filter, contrast: state.adjustments.contrast)
         } catch {
             errorMessage = "Couldn't save the photo."

@@ -21,3 +21,4 @@
 - Duo Studio: xác minh `.onCameraCaptureEvent` (AVKit) làm remote shutter — chưa kiểm tra signature/availability thật, viết trên Windows. (2026-09-20, cần thiết bị thật)
 - Duo Studio: xác minh xử lý orientation/mirroring của FrameProcessor khi dùng camera trước ở chế độ self-portrait. (2026-09-20, cần thiết bị thật)
 - Duo Studio: Enable `DUO_DIRECTION_COORDINATOR` on a Mac with Xcode 27.1: confirm `AVCaptureDeviceDirectionMap`/`AVCaptureDeviceDescriptor` → device mapping (`uniqueID`?), then turn the flag on. (2026-09-20)
+- Duo Studio: `SimulatedFrameSource`'s canned gesture script (swipe/pinch/fist/point loop) is dev-only, hand-authored to exercise `GestureRecognizer`'s code paths — it proves nothing about real Vision hand detection. Verify the real Vision path (`FrameProcessor`) on an iPhone Duo after 2026-10-23. (2026-09-20, no Mac/Duo hardware to verify against from Windows)

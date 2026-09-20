@@ -15,7 +15,7 @@ enum CameraServiceError: Error {
 /// already-configured, effectively-immutable `AVCaptureVideoDataOutput`). Every public method
 /// re-enters `sessionQueue` before touching state, so nothing here is read concurrently with a
 /// write.
-final class CameraService: NSObject, @unchecked Sendable {
+final class CameraService: NSObject, CaptureSource, @unchecked Sendable {
     private let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "tech.kioh.duostudio.session")
     private let videoQueue = DispatchQueue(label: "tech.kioh.duostudio.video")
