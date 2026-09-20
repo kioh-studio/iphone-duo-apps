@@ -2,8 +2,14 @@
 name: Core packages
 
 on:
+  # Repo is private, so macOS runner minutes burn the free quota at 10x — only
+  # run push builds when a core package or this workflow actually changes.
   push:
     branches: ["**"]
+    paths:
+      - "FaceToFaceCaption/CaptionCore/**"
+      - "DuoStudio/PoseCore/**"
+      - ".github/workflows/core-packages.yml"
   workflow_dispatch:
 
 jobs:
