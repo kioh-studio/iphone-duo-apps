@@ -77,7 +77,7 @@ private func referencePose() -> Pose {
         let pose = referencePose()
         let mirroredOnce = PoseMatcher.mirrored(pose)
         // Left/right swapped, x flipped.
-        #expect(mirroredOnce.joints[.rightShoulder]!.x == pose.joints[.leftShoulder]!.x)
+        #expect(abs(mirroredOnce.joints[.rightShoulder]!.x - (1 - pose.joints[.leftShoulder]!.x)) < 1e-9)
         #expect(abs(mirroredOnce.joints[.leftShoulder]!.x - (1 - pose.joints[.rightShoulder]!.x)) < 1e-9)
 
         let mirroredTwice = PoseMatcher.mirrored(mirroredOnce)
