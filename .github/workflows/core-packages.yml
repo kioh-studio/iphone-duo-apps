@@ -17,6 +17,7 @@ jobs:
     name: Core package (${{ matrix.package-path }})
     runs-on: macos-latest
     strategy:
+      fail-fast: false
       matrix:
         package-path:
           - FaceToFaceCaption/CaptionCore
