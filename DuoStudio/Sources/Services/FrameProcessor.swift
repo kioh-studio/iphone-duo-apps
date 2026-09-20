@@ -1,19 +1,24 @@
 import AVFoundation
 import CoreImage
-import Vision
+@preconcurrency import Vision
 import os
 import PoseCore
 
-// UNVERIFIED (2026-09-20, written on Windows): CGImage's Sendable conformance in the iOS 26 SDK.
-// Treated as safe to cross the actor hop below because each `CGImage` here is a freshly rendered,
-// immutable snapshot from a private `CIContext` that's never mutated or read again afterwards.
-struct FrameResult: Sendable {
+/// `@unchecked Sendable`: `image` is a freshly rendered, immutable `CGImage` snapshot from a
+/// private `CIContext` that's never mutated or read again afterwards, and `pose`/`hand` are plain
+/// value types — nothing here is shared mutable state, so crossing the actor hop below is safe even
+/// though `CGImage`'s own `Sendable` conformance isn't confirmed on the iOS 26 SDK.
+struct FrameResult: @unchecked Sendable {
     let image: CGImage
     let pose: Pose?
     /// `nil` when this frame wasn't a Vision-detection frame at all; non-`nil` (possibly with all
     /// `nil` fields, meaning "no hand seen") on every detection frame, so `GestureRecognizer` gets
     /// a steady ~10 Hz feed and can reset its hold timers on hand loss per its own contract.
     let hand: HandSample?
+    /// True on every 3rd frame (see `poseFrameInterval`), the ones `pose`/`hand` actually came from
+    /// Vision on. `StudioModel.receive(_:)` only updates `livePose`/`match` on these — updating them
+    /// on every frame (most of which have `pose == nil`) is what caused the skeleton to flicker.
+    let isDetectionFrame: Bool
 }
 
 /// Turns raw camera frames into: (1) a filtered, downscaled preview image, and (2) — every third
@@ -26,9 +31,9 @@ struct FrameResult: Sendable {
 ///
 /// `@unchecked Sendable`: `frameCount` and `ciContext` are only ever touched from `videoQueue`
 /// (the queue `CameraService` registers this delegate on), so there's no concurrent access to
-/// guard against. `cameraState` is the one piece of state written from elsewhere (`StudioModel`
-/// on `MainActor` for filter/contrast, `CameraService` on `sessionQueue` for camera position) and
-/// read here, so it goes through `OSAllocatedUnfairLock` instead of being a plain stored property.
+/// guard against. `cameraState` is the one piece of state written from elsewhere (`StudioModel` on
+/// `MainActor`, for filter/contrast) and read here, so it goes through `OSAllocatedUnfairLock`
+/// instead of being a plain stored property.
 final class FrameProcessor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
     /// Set once by `StudioModel` right after both are constructed (see `StudioModel.init`).
     /// `weak` because `StudioModel` owns `CameraService`, which owns this processor — a strong
@@ -43,7 +48,6 @@ final class FrameProcessor: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     private struct CameraState {
         var filter: StudioFilter = .none
         var contrast: Double = 1
-        var position: AVCaptureDevice.Position = .back
         /// True from the moment a `FrameResult` is handed to the `Task { @MainActor in ... }`
         /// below until `StudioModel.receive(_:)` returns, so a busy main actor can't accumulate an
         /// unbounded queue of pending deliveries.
@@ -64,12 +68,6 @@ final class FrameProcessor: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         }
     }
 
-    /// Called by `CameraService` (from `sessionQueue`) whenever the active device changes, so
-    /// orientation handling matches whichever physical camera is now feeding frames.
-    func updatePosition(_ position: AVCaptureDevice.Position) {
-        cameraState.withLock { $0.position = position }
-    }
-
     // ponytail: CGImage per frame via one shared CIContext; move to MTKView if the live preview
     // measurably drops frames on device.
     func captureOutput(
@@ -78,17 +76,13 @@ final class FrameProcessor: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
 
-        let (filter, contrast, position) = cameraState.withLock { ($0.filter, $0.contrast, $0.position) }
+        let (filter, contrast) = cameraState.withLock { ($0.filter, $0.contrast) }
 
-        // UNVERIFIED (2026-09-20, written on Windows): orientation needed to reach the canonical
-        // "upright, un-mirrored" image PoseCore's coordinate convention assumes (see Pose.swift).
-        // `.right` puts the back camera's native landscape sensor output upright for portrait.
-        // The front sensor's raw buffer is mirrored left-right relative to the back sensor's, so
-        // `.leftMirrored` is used instead, to rotate to portrait-upright *and* undo that mirror in
-        // one step — unconfirmed on a real device, and unconfirmed for the Duo's inner ultrawide
-        // used in self-portrait mode, which may not share the classic front camera's mount.
-        let orientation: CGImagePropertyOrientation = position == .front ? .leftMirrored : .right
-        let upright = CIImage(cvPixelBuffer: pixelBuffer).oriented(orientation)
+        // Already upright and un-mirrored: `CameraService.configureConnections()` sets the video
+        // data output connection's `videoRotationAngle`/`isVideoMirrored` to match PoseCore's
+        // "upright, un-mirrored" coordinate convention (see `Pose.swift`), so no per-frame
+        // orientation guess is needed here.
+        let upright = CIImage(cvPixelBuffer: pixelBuffer)
         var ciImage = upright
 
         if let filterName = filter.coreImageName {
@@ -129,7 +123,7 @@ final class FrameProcessor: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
             return
         }
 
-        let result = FrameResult(image: cgImage, pose: pose, hand: hand)
+        let result = FrameResult(image: cgImage, pose: pose, hand: hand, isDetectionFrame: isDetectionFrame)
         // Snapshot the weak reference to a local `let` first: a single, disconnected reference is
         // what Swift 6's `sending` closure on `Task.init` needs to hand `model` (non-`Sendable`,
         // `@MainActor`-isolated) over to the main actor without a data race.
@@ -162,22 +156,32 @@ final class FrameProcessor: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         return (pose, hand)
     }
 
-    private static let bodyJointMap: [(Joint, VNHumanBodyPoseObservation.JointName)] = [
-        (.nose, .nose), (.neck, .neck),
-        (.leftShoulder, .leftShoulder), (.rightShoulder, .rightShoulder),
-        (.leftElbow, .leftElbow), (.rightElbow, .rightElbow),
-        (.leftWrist, .leftWrist), (.rightWrist, .rightWrist),
-        (.leftHip, .leftHip), (.rightHip, .rightHip),
-        (.leftKnee, .leftKnee), (.rightKnee, .rightKnee),
-        (.leftAnkle, .leftAnkle), (.rightAnkle, .rightAnkle),
-        (.root, .root),
-    ]
+    private static func vnJoint(for bodyJoint: Joint) -> VNHumanBodyPoseObservation.JointName {
+        switch bodyJoint {
+        case .nose: return .nose
+        case .neck: return .neck
+        case .leftShoulder: return .leftShoulder
+        case .rightShoulder: return .rightShoulder
+        case .leftElbow: return .leftElbow
+        case .rightElbow: return .rightElbow
+        case .leftWrist: return .leftWrist
+        case .rightWrist: return .rightWrist
+        case .leftHip: return .leftHip
+        case .rightHip: return .rightHip
+        case .leftKnee: return .leftKnee
+        case .rightKnee: return .rightKnee
+        case .leftAnkle: return .leftAnkle
+        case .rightAnkle: return .rightAnkle
+        case .root: return .root
+        }
+    }
 
     /// Vision's normalized points have their origin bottom-left; `PoseCore.Point2` (and the whole
     /// app) uses top-left, so `y` is flipped on the way in.
     private func bodyPose(from observation: VNHumanBodyPoseObservation) -> Pose? {
         var joints: [Joint: Point2] = [:]
-        for (poseJoint, vnJoint) in Self.bodyJointMap {
+        for poseJoint in Joint.allCases {
+            let vnJoint = Self.vnJoint(for: poseJoint)
             guard let point = try? observation.recognizedPoint(vnJoint), point.confidence > Self.minConfidence else { continue }
             joints[poseJoint] = Point2(x: Double(point.location.x), y: 1 - Double(point.location.y))
         }

@@ -108,16 +108,20 @@ struct SubjectView: View {
     }
 
     // UNVERIFIED (2026-09-20, written on Windows): SF Symbols has no confirmed literal
-    // "fist"/"pinch" glyph — `hand.raised.fill` and `hand.pinch` are best-guess stand-ins pending
+    // "fist"/"OK sign" glyph — `hand.raised.fill` and `hand.pinch` are best-guess stand-ins pending
     // a symbol picker check on a Mac; the words alongside them carry the real meaning either way.
     private var legend: some View {
         HStack(spacing: Theme.Space.lg) {
             legendItem(symbol: "hand.raised", text: "swipe = filter")
-            legendItem(symbol: "hand.pinch", text: "pinch = zoom")
+            // `HandClassifier.classify` only reads `.pinch` when the other three fingers are
+            // extended (an OK sign) — an ordinary pinch with the rest of the hand curled reads as
+            // `.fist` instead. The symbol stays; the word matches what the classifier actually
+            // requires.
+            legendItem(symbol: "hand.pinch", text: "OK sign = zoom")
             legendItem(symbol: "hand.raised.fill", text: "fist = setting")
             legendItem(symbol: "hand.point.up.left.fill", text: "point = adjust")
         }
-        .font(Theme.TypeFace.label)
+        .font(Theme.TypeFace.outerLegend)
         .lineLimit(1)
         .minimumScaleFactor(0.7)
     }

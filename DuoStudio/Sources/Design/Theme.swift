@@ -53,6 +53,8 @@ enum Theme {
         static let outerScore: Font = .system(size: 96, weight: .semibold, design: .monospaced)
         static let outerLabel: Font = .system(size: 34, weight: .semibold, design: .monospaced)
         static let outerToast: Font = .system(size: 44, weight: .bold)
+        /// `SubjectView`'s gesture legend — bigger than `label`, since it has to read at 2–3 m.
+        static let outerLegend: Font = .system(size: 22, weight: .medium, design: .monospaced)
     }
 
     enum Stroke {

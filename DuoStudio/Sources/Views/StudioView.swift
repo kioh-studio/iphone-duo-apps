@@ -18,13 +18,22 @@ struct StudioView: View {
 
     var body: some View {
         content
-            .onDisappear { model.stop() }
+            .background(CameraDirectionAnchor(model: model))
+            .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
+            .onDisappear {
+                model.stop()
+                UIApplication.shared.isIdleTimerDisabled = false
+            }
             .modifier(OuterDisplayAccessory(model: model))
             // UNVERIFIED (2026-09-20, written on Windows): `.onCameraCaptureEvent { event in }`
             // (AVKit, iOS 18+) — exact modifier name and `event.phase` shape for remote-shutter
             // handling (volume buttons, Camera Control, Bluetooth remotes). Wired for both modes
             // per the ADDENDUM. No self-timer, no gesture shutter.
-            .onCameraCaptureEvent { event in
+            //
+            // `[model]`: an explicit capture list so the closure captures the `@Environment` value
+            // itself rather than reading the (possibly nonisolated-context) `model` property off
+            // `self` each time it's invoked.
+            .onCameraCaptureEvent { [model] event in
                 guard event.phase == .ended else { return }
                 Task { await model.capture() }
             }

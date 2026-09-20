@@ -20,4 +20,4 @@
 - Duo Studio: ASO — tên "Duo Studio: Advanced Camera", subtitle "Pose guide & gesture control", keywords, icon kiểu ống kính, screenshot đầu tiên cho thấy model với skeleton trên màn ngoài, nộp Featuring Nomination trên App Store Connect trước 23/10/2026. (2026-09-20, đề xuất từ lead, chưa duyệt/thực hiện)
 - Duo Studio: xác minh `.onCameraCaptureEvent` (AVKit) làm remote shutter — chưa kiểm tra signature/availability thật, viết trên Windows. (2026-09-20, cần thiết bị thật)
 - Duo Studio: xác minh xử lý orientation/mirroring của FrameProcessor khi dùng camera trước ở chế độ self-portrait. (2026-09-20, cần thiết bị thật)
-- Duo Studio: `AVCaptureDeviceDirectionCoordinator` hiện được tạo với `view: nil` — spec ngụ ý tham số này cần UIView của inner preview thật để coordinator biết đang xét màn nào; cần bọc preview bằng `UIViewRepresentable` và truyền view thật vào, sau khi xác minh hình dạng SDK thật trên Mac. (2026-09-20, chưa có Mac/Xcode 27.1 để xác minh)
+- Duo Studio: Enable `DUO_DIRECTION_COORDINATOR` on a Mac with Xcode 27.1: confirm `AVCaptureDeviceDirectionMap`/`AVCaptureDeviceDescriptor` → device mapping (`uniqueID`?), then turn the flag on. (2026-09-20)

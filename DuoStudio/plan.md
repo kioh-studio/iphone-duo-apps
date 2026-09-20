@@ -28,17 +28,26 @@ UserDefaults as JSON.
   events and inner-UI edits both flow through, so the two paths can never disagree.
 - `CameraService` — owns the `AVCaptureSession` (confined to a private serial `sessionQueue`;
   frames delivered on a private `videoQueue`), selects the subject-facing (or, in self-portrait
-  mode, user-facing) camera, and applies hardware exposure/white-balance adjustments. Only the
-  knob that actually changed is touched: white balance stays on auto until warmth is deliberately
-  adjusted away from its 5500 K default, so switching filters or nudging exposure never locks WB
-  as a side effect; when the active device changes (mode switch or a Duo posture change), the last
-  applied exposure is always re-pushed to the new device, and warmth only if it was ever touched.
-- `FrameProcessor` — per frame: builds an upright `CIImage`, applies the current filter + contrast,
-  publishes a downscaled `CGImage`; every 3rd frame, runs Vision body- and hand-pose requests
-  (against the unfiltered upright image — see Frame drop policy below) and converts the results
-  into `PoseCore` types.
+  mode, user-facing) camera, applies hardware exposure/white-balance adjustments, and sets the
+  video connection's rotation/mirroring so frames always arrive upright and un-mirrored (see
+  Orientation below). Only the exposure/WB knob that actually changed is touched: white balance
+  stays on auto until warmth is deliberately adjusted away from its 5500 K default, so switching
+  filters or nudging exposure never locks WB as a side effect; when the active device changes (mode
+  switch or a Duo posture change), the last applied exposure is always re-pushed to the new device,
+  and warmth only if it was ever touched. White balance is locked only when
+  `isLockingWhiteBalanceWithCustomDeviceGainsSupported` is true, and the exposure bias is clamped to
+  `device.minExposureTargetBias...maxExposureTargetBias` — both unconditionally would otherwise
+  throw an uncatchable ObjC exception on a device with narrower hardware ranges.
+- `FrameProcessor` — per frame: builds a `CIImage` (already upright/un-mirrored — see Orientation),
+  applies the current filter + contrast, publishes a downscaled `CGImage`; every 3rd frame, runs
+  Vision body- and hand-pose requests (against the unfiltered upright image — see Frame drop policy
+  below) and converts the results into `PoseCore` types. `FrameResult.isDetectionFrame` marks which
+  frames those were, so `StudioModel.receive(_:)` knows when `pose`/`hand` are meaningful.
 - `PhotoWriter` — bakes the current filter + contrast into the captured photo and writes it to the
-  Photo library (exposure/warmth are already baked in by the hardware at capture time).
+  Photo library (exposure/warmth are already baked in by the hardware at capture time). When
+  neither the filter nor the contrast actually changes anything (`filter == .none` and
+  `abs(contrast - 1) < 0.001`), the original capture `Data` is saved untouched instead of round-
+  tripping through Core Image, so EXIF and bit depth survive.
 
 ## Data flow
 
@@ -57,6 +66,26 @@ subject's outer view are always showing the same match %, filter, and parameter.
 frame is dropped entirely — no render, no Vision detection — rather than queued behind a busy main
 actor. `frameCount` still advances on a dropped frame, so the every-3rd-frame detection cadence
 doesn't drift; the flag clears right after `receive(_:)` returns.
+
+**Detection-frame-only pose updates:** Vision only runs on every 3rd frame, but `previewImage`
+updates every frame. `StudioModel.receive(_:)` reflects that split: `previewImage` is always
+updated, while `livePose`/`match` (and the gesture feed, which depends on `pose`/`hand` anyway) only
+update when `FrameResult.isDetectionFrame` is true. Updating `livePose` unconditionally used to null
+it out on the 2 of every 3 frames Vision didn't run on, which was the cause of the skeleton overlay
+visibly flickering.
+
+**Orientation:** `CameraService.configureConnections()` sets the video data output connection's
+`videoRotationAngle = 90` (when supported) and `isVideoMirrored = false` with
+`automaticallyAdjustsVideoMirroring = false` (when supported), run after both `configureSession()`
+and `reconfigureInput()` since swapping the active input can hand the output a new connection. This
+replaces a per-frame `CIImage.oriented(_:)` guess keyed off device position in `FrameProcessor`,
+which is now just `CIImage(cvPixelBuffer:)` with no orientation argument — the buffer already
+arrives upright and un-mirrored. Photo capture instead uses an `AVCaptureDevice.RotationCoordinator`
+(session-queue-confined, recreated whenever the active device changes alongside
+`videoDeviceInput`): `capturePhoto()` sets the photo output connection's `videoRotationAngle` to
+`rotationCoordinator.videoRotationAngleForHorizonLevelCapture` right before capturing, so a single
+photo can reflect the device's horizon-level rotation independently of the live preview's fixed
+angle.
 
 ## Gesture rules (implemented in `PoseCore.GestureRecognizer`)
 
@@ -99,20 +128,42 @@ UserDefaults key `"captureMode"`, default `.partner`.
 - **`.partner`** (the primary spec): photographer on the inner display, camera faces the subject,
   the subject sees `SubjectView` on the Duo's outer display via `CameraCaptureAccessory`.
 - **`.selfPortrait`** (works on every iPhone, not just the Duo): phone on a tripod facing the user.
-  `CameraService.setMode(_:)` reconfigures the input on `sessionQueue`: on iOS 27.1+, the direction
-  coordinator picks the device facing *toward* the inner-display view (the same view the user is
-  looking at); otherwise `.builtInWideAngleCamera` at position `.front`. The main (and only) screen
-  shows the `SubjectView` composition directly, with a thin control layer added on top (shutter,
-  mode switch, template picker). `isOuterEnabled` is forced `false` in this mode — nothing is
-  driving the outer display, so it stays off rather than showing a stale frame.
-- `FrameProcessor` needs to know the active camera position for orientation handling (front camera:
-  upright + mirror handling differs from back/outer) — passed down as a lock-protected value
-  alongside the current filter, the same mechanism `StudioModel` already uses to push
-  filter/contrast changes.
+  `CameraService.setMode(_:)` reconfigures the input on `sessionQueue`: with
+  `DUO_DIRECTION_COORDINATOR` enabled on iOS 27.1+, the direction coordinator's forward-facing
+  device (the one facing the same view the user is looking at) is used; otherwise
+  `.builtInWideAngleCamera` at position `.front`. The main (and only) screen shows the `SubjectView`
+  composition directly, with a thin control layer added on top (shutter, mode switch, template
+  picker). `isOuterEnabled` is forced `false` in this mode — nothing is driving the outer display,
+  so it stays off rather than showing a stale frame. Switching back to `.partner` restores
+  `isOuterEnabled = true`.
 - **Remote shutter** (both modes, but the only shutter path in self-portrait mode): SwiftUI's
   `.onCameraCaptureEvent { event in if event.phase == .ended { model.capture() } }` (AVKit) fires
   on the volume buttons, Camera Control, or a paired Bluetooth remote. No self-timer, no countdown
   — a physical remote press is the trigger.
+
+### `DUO_DIRECTION_COORDINATOR` flag
+
+`AVCaptureDeviceDirectionCoordinator` (AVKit, main-actor isolated) needs a live `UIView` to reason
+about which side of the Duo it's on, so it can't live inside `CameraService` (which owns no view).
+`Sources/Views/CameraDirectionAnchor.swift` is an invisible `UIViewRepresentable` placed in
+`StudioView`'s background; its `Coordinator` creates
+`AVCaptureDeviceDirectionCoordinator(view:deviceTypes:changeHandler:)` with that hosting view and
+`[.builtInOuterUltraWideCamera, .builtInInnerUltraWideCamera, .builtInDualWideCamera]`, and keeps it
+alive as a stored property (a local `let` would be deallocated, and its change handler with it,
+before it could ever fire). The change handler receives an `AVCaptureDeviceDirectionMap` with
+`forwardFacingDeviceDescriptors`/`backwardFacingDeviceDescriptors` (forward = facing the same view
+the photographer looks at); each descriptor's `uniqueID` (UNVERIFIED) is forwarded through
+`StudioModel.updateCameraDirections(forwardIDs:backwardIDs:)` to
+`CameraService.setDirectionalDevices(forwardIDs:backwardIDs:)` (sessionQueue-confined storage, then
+`reconfigureInput()` if the session is already configured). `selectDevice(for:)` resolves the first
+ID for the mode (`.partner` → backward, `.selfPortrait` → forward) via `AVCaptureDevice
+(uniqueID:)`, falling back to the classic `.builtInWideAngleCamera` `.back`/`.front` when there are
+no IDs yet.
+
+The whole coordinator implementation is compiled only under the `DUO_DIRECTION_COORDINATOR` Swift
+flag (documented, but **not** set, in `project.yml`), nested inside `if #available(iOS 27.1, *)` —
+so the flag is off by default and a first Mac build can't fail on an API that's never been checked
+against the real SDK. Turning it on is tracked in `backlog.md`.
 
 ## Privacy
 
@@ -120,6 +171,12 @@ Everything on-device: Vision pose/hand detection, Core Image filtering, and PHPh
 never leave the phone. No network calls, no analytics. Custom pose templates are the only thing
 persisted (UserDefaults, JSON) — no transcript or captured-frame history is kept once the app is
 backgrounded or terminated.
+
+`Resources/PrivacyInfo.xcprivacy` declares this: no tracking, no tracking domains, no collected data
+types, and one accessed-API-type entry for `NSPrivacyAccessedAPICategoryUserDefaults` (reason
+`CA92.1`, for the custom-template/capture-mode persistence above). Not excluded from the `Resources`
+group in `project.yml`, so XcodeGen picks it up as a plain resource alongside `Info.plist`/
+`Assets.xcassets`.
 
 ## Verification status
 
@@ -129,11 +186,11 @@ was available to compile or run any of this.
 | API | Used for | Status | Source |
 |---|---|---|---|
 | `.sceneAccessory` / `CameraCaptureAccessory` | Outer display in Partner mode | Unverified — iOS 27.1 SDK not yet released | Tech Talk 111464 — https://developer.apple.com/videos/play/tech-talks/111464/ |
-| `AVCaptureDeviceDirectionCoordinator(view:deviceTypes:changeHandler:)`, `.builtInOuterUltraWideCamera` / `.builtInInnerUltraWideCamera` | Picking the subject-facing (Partner) or user-facing (self-portrait) camera on the Duo | Unverified — iOS 27.1 SDK not yet released | Tech Talk 111465 — https://developer.apple.com/videos/play/tech-talks/111465/ |
+| `AVCaptureDeviceDirectionCoordinator(view:deviceTypes:changeHandler:)`, `AVCaptureDeviceDirectionMap.forwardFacingDeviceDescriptors`/`backwardFacingDeviceDescriptors`, `AVCaptureDeviceDescriptor.uniqueID` | Picking the subject-facing (Partner) or user-facing (self-portrait) camera on the Duo | Unverified — gated behind `DUO_DIRECTION_COORDINATOR` (off), not compiled into the default build | Tech Talk 111465 — https://developer.apple.com/videos/play/tech-talks/111465/ |
+| `AVCaptureDevice.RotationCoordinator(device:previewLayer:)`, `videoRotationAngleForHorizonLevelCapture`, `AVCaptureConnection.videoRotationAngle`/`isVideoMirrored` | Upright, un-mirrored live preview + horizon-correct photo capture | Unverified — documented iOS 17+ API, but exact behavior on Duo hardware not checked from Windows | Not checked from Windows |
 | Camera-only dual-display behavior; outer display takes no touch | Confirms the non-interactive `SubjectView` design and that only `CameraCaptureAccessory` (not a general window) targets the outer display | Unverified — third-party notes, not Apple docs | Group Labs Q&A — https://gist.github.com/frankschlegel/6356a059426b2393528691822edfdae6 |
 | `.onCameraCaptureEvent` (AVKit, iOS 18+) | Remote shutter (volume buttons / Camera Control / Bluetooth remote) in both capture modes | Unverified — signature/availability not checked against real docs from Windows | Not checked from Windows |
 | `VNDetectHumanBodyPoseRequest` / `VNDetectHumanHandPoseRequest` joint names and confidence semantics | Converting Vision output into `PoseCore.Pose` / hand joints | Unverified | Not checked from Windows |
-| Front-camera orientation/mirroring in `FrameProcessor` for self-portrait mode | Keeping the live preview and skeleton aligned when the front camera is active | Unverified | Not checked from Windows |
 
 ## Out of scope
 

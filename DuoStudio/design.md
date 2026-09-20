@@ -49,6 +49,9 @@ OKLCH, defined once in `Sources/Design/Theme.swift`, converted to RGB via `PoseC
   - **outerLabel**: `.system(size: 34, weight: .semibold, design: .monospaced)` — filter name /
     selected parameter value.
   - **outerToast**: `.system(size: 44, weight: .bold)` — recognised-gesture toast.
+  - **outerLegend**: `.system(size: 22, weight: .medium, design: .monospaced)` — the gesture legend
+    row. Bigger than `label` (12pt) — the legend has to read at the same 2–3 m distance as the rest
+    of the outer HUD, and `label`'s caption size doesn't.
 
 No italics, no gradients, no shadows/glows, no glass, no emoji.
 
@@ -77,6 +80,16 @@ preview via `PreviewLayout.aspectFillRect`).
 - **Camera denied**: centred message + "Open Settings" button.
 - **Shutter flash**: full-screen `paper`-coloured overlay, opacity pulse over `Motion.shutterFlash`
   (skipped under Reduce Motion — an instant cut instead).
+- **Idle timer**: disabled (`UIApplication.shared.isIdleTimerDisabled = true`) for as long as
+  `StudioView` is on screen, re-enabled on disappear — same pattern as Across's `ConversationView`.
+  Needed most in self-portrait mode, where the phone sits on a tripod with nobody touching it
+  between shots and would otherwise auto-lock mid-session.
+
+**Pose editor** (`PoseEditorView`, sheet): a frozen snapshot of the preview — taken once, on
+appear, not the live feed — dimmed to 40% opacity, with the selected template's skeleton drawn over
+it and a 44pt drag handle per present joint. Frozen so the backdrop (and the handles positioned
+against it) don't shift under the photographer's finger mid-drag; "Use live pose" still pulls the
+*current* live pose into the editable skeleton on demand.
 
 ### Outer display (the model) — `SubjectView`
 
@@ -89,8 +102,11 @@ scaled by `state.outerZoom` around its centre.
   `scrim` background band.
 - **Centre toast**: the last recognised gesture (icon + word) in `outerToast`, crossfading in/out,
   clearing after 1.5 s.
-- **Gesture legend**: a small persistent row, SF Symbols + one word each — swipe palm = filter,
-  pinch = zoom, fist = setting, point = adjust.
+- **Gesture legend**: a small persistent row, SF Symbols + one word each, in `outerLegend` — swipe
+  palm = filter, OK sign = zoom, fist = setting, point = adjust. "OK sign", not "pinch": the
+  classifier only recognises `.pinch` when the other three fingers are extended (an OK sign) — an
+  ordinary pinch with the rest of the hand curled reads as `.fist` instead, so the word has to match
+  what actually triggers it.
 - Always dark, regardless of system appearance — the outer display is a monitor, not a themed
   screen.
 
@@ -123,7 +139,7 @@ animations, no parallax.
 | Hand shape | Action |
 |---|---|
 | Swipe open palm | Change filter (direction = swipe direction) |
-| Pinch | Zoom the outer preview only (inspection zoom — the captured photo is never zoomed) |
+| OK sign (pinch with the other three fingers extended) | Zoom the outer preview only (inspection zoom — the captured photo is never zoomed) |
 | Hold fist | Select next parameter (exposure → contrast → warmth → …) |
 | Hold point up / point down | Adjust the selected parameter up / down, repeating while held |
 

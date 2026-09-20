@@ -9,11 +9,12 @@ enum CameraServiceError: Error {
 /// `FrameProcessor`) and photo capture.
 ///
 /// `@unchecked Sendable`: every stored mutable property (`session`, `videoDeviceInput`, `mode`,
-/// `isConfigured`, `activePhotoCapture`, `directionCoordinator`, `lastAppliedAdjustments`) is only
-/// ever touched from `sessionQueue`, a private serial queue — never from `MainActor` or from
-/// `videoQueue` (which only ever sees the already-configured, effectively-immutable
-/// `AVCaptureVideoDataOutput`). Every public method re-enters `sessionQueue` before touching
-/// state, so nothing here is read concurrently with a write.
+/// `isConfigured`, `activePhotoCapture`, `forwardDeviceIDs`, `backwardDeviceIDs`,
+/// `rotationCoordinator`, `lastAppliedAdjustments`) is only ever touched from `sessionQueue`, a
+/// private serial queue — never from `MainActor` or from `videoQueue` (which only ever sees the
+/// already-configured, effectively-immutable `AVCaptureVideoDataOutput`). Every public method
+/// re-enters `sessionQueue` before touching state, so nothing here is read concurrently with a
+/// write.
 final class CameraService: NSObject, @unchecked Sendable {
     private let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "tech.kioh.duostudio.session")
@@ -26,11 +27,17 @@ final class CameraService: NSObject, @unchecked Sendable {
     private var mode: CaptureMode = .partner
     private var isConfigured = false
     private var activePhotoCapture: PhotoCaptureDelegate?
-    /// Untyped so the property itself doesn't need an `@available` annotation; the only place that
-    /// touches it (`selectDuoDevice`) is already `@available(iOS 27.1, *)` and casts back. Created
-    /// once and reused — a local `let` would be deallocated (and its change handler with it)
-    /// before it could ever fire.
-    private var directionCoordinator: AnyObject?
+    /// Device unique IDs reported by the direction coordinator (see `CameraDirectionAnchor`,
+    /// gated behind `DUO_DIRECTION_COORDINATOR`): "forward" faces the same view the photographer
+    /// looks at, "backward" faces away from it. Empty until the flag is enabled and the
+    /// coordinator's change handler has fired at least once — `selectDevice(for:)` falls back to
+    /// the classic wide-angle cameras until then.
+    private var forwardDeviceIDs: [String] = []
+    private var backwardDeviceIDs: [String] = []
+    /// Horizon-level rotation for photo capture only — the live preview instead gets a fixed
+    /// `videoRotationAngle` (see `configureConnections()`). Tied to one device, so it's recreated
+    /// alongside `videoDeviceInput` in `addInput(for:)` and `reconfigureInput()`.
+    private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
     /// The last `Adjustments` actually pushed to a device, so `apply(_:)` only touches the hardware
     /// knob that changed (see `apply(_:)`) and `reconfigureInput()` knows whether warmth was ever
     /// touched away from its default.
@@ -82,6 +89,19 @@ final class CameraService: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Called by `CameraDirectionAnchor`'s coordinator change handler with the Duo's current
+    /// forward/backward-facing device IDs. `configureSession()` may already have picked a fallback
+    /// device before the coordinator had a live view to report from, so a `reconfigureInput()`
+    /// re-evaluates the pick once real IDs arrive.
+    func setDirectionalDevices(forwardIDs: [String], backwardIDs: [String]) {
+        sessionQueue.async { [self] in
+            forwardDeviceIDs = forwardIDs
+            backwardDeviceIDs = backwardIDs
+            guard isConfigured else { return }
+            reconfigureInput()
+        }
+    }
+
     // MARK: - Session configuration (sessionQueue only)
 
     private func configureSession() {
@@ -101,6 +121,8 @@ final class CameraService: NSObject, @unchecked Sendable {
         if session.canAddOutput(photoOutput) {
             session.addOutput(photoOutput)
         }
+
+        configureConnections()
     }
 
     private func addInput(for mode: CaptureMode) {
@@ -109,12 +131,12 @@ final class CameraService: NSObject, @unchecked Sendable {
             session.addInput(input)
             videoDeviceInput = input
         }
-        frameProcessor.updatePosition(device.position)
+        rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
     }
 
     /// Swaps the active input for the device the current `mode` wants, without touching outputs.
-    /// Also used as the direction coordinator's change handler, so posture changes (partner mode)
-    /// re-run the same "which device does this mode want" logic.
+    /// Also re-run whenever the direction coordinator reports new device IDs, so a Duo posture
+    /// change (partner mode) picks up the same "which device does this mode want" logic.
     private func reconfigureInput() {
         guard let device = selectDevice(for: mode), let input = try? AVCaptureDeviceInput(device: device) else { return }
         guard device.uniqueID != videoDeviceInput?.device.uniqueID else { return }
@@ -125,7 +147,8 @@ final class CameraService: NSObject, @unchecked Sendable {
             videoDeviceInput = input
         }
         session.commitConfiguration()
-        frameProcessor.updatePosition(device.position)
+        rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
+        configureConnections()
 
         // The new device starts on its own hardware defaults, so re-push exposure unconditionally;
         // white balance only if warmth was ever actually touched away from its default (otherwise
@@ -134,13 +157,31 @@ final class CameraService: NSObject, @unchecked Sendable {
         applyToDevice(device, adjustments: lastAppliedAdjustments, setExposure: true, setWarmth: warmthTouched)
     }
 
+    /// Sets the video data output connection's rotation/mirroring so frames always arrive upright
+    /// and un-mirrored, whichever physical camera is active — `FrameProcessor` no longer guesses an
+    /// orientation from device position. Re-run after both `configureSession()` and
+    /// `reconfigureInput()`, since swapping the input can hand the output a fresh connection.
+    private func configureConnections() {
+        guard let connection = videoOutput.connection(with: .video) else { return }
+        if connection.isVideoRotationAngleSupported(90) {
+            connection.videoRotationAngle = 90
+        }
+        if connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = false
+        }
+    }
+
     /// Partner mode wants the camera facing the subject (away from the photographer's inner-display
     /// view), so the outer display mirrors what the lens sees. Self-portrait mode wants the camera
-    /// facing the same screen the user is looking at — the classic "selfie" camera. iOS 27.1+ Duo
-    /// hardware exposes a direction coordinator that knows which ultrawide faces which side;
-    /// everything else (non-Duo iPhones, or pre-27.1 SDKs) falls back to the classic wide cameras.
+    /// facing the same screen the user is looking at — the classic "selfie" camera. With
+    /// `DUO_DIRECTION_COORDINATOR` enabled on iOS 27.1+ Duo hardware, `forwardDeviceIDs`/
+    /// `backwardDeviceIDs` carry the coordinator's current picks (see `CameraDirectionAnchor`);
+    /// everything else (non-Duo iPhones, the flag off, or no coordinator report yet) falls back to
+    /// the classic wide cameras.
     private func selectDevice(for mode: CaptureMode) -> AVCaptureDevice? {
-        if #available(iOS 27.1, *), let device = selectDuoDevice(for: mode) {
+        let ids = mode == .partner ? backwardDeviceIDs : forwardDeviceIDs
+        if let id = ids.first, let device = AVCaptureDevice(uniqueID: id) {
             return device
         }
         switch mode {
@@ -149,42 +190,6 @@ final class CameraService: NSObject, @unchecked Sendable {
         case .selfPortrait:
             return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
         }
-    }
-
-    // UNVERIFIED (2026-09-20, written on Windows): `AVCaptureDeviceDirectionCoordinator`'s
-    // initializer signature per the spec is `(view:deviceTypes:changeHandler:)`. The `view:`
-    // parameter presumably wants the UIView hosting the live preview, so the coordinator can
-    // reason about the view's screen (inner vs. outer); `CameraService` owns no view, so `nil` is
-    // passed here. If the real SDK requires a non-optional view, this construction needs to move
-    // to wherever the preview `UIView`/`AVCaptureVideoPreviewLayer` lives instead.
-    @available(iOS 27.1, *)
-    private func selectDuoDevice(for mode: CaptureMode) -> AVCaptureDevice? {
-        let coordinator: AVCaptureDeviceDirectionCoordinator
-        if let existing = directionCoordinator as? AVCaptureDeviceDirectionCoordinator {
-            coordinator = existing
-        } else {
-            let deviceTypes: [AVCaptureDevice.DeviceType] = [
-                .builtInOuterUltraWideCamera, .builtInInnerUltraWideCamera, .builtInDualWideCamera,
-            ]
-            // `[weak self]`: the coordinator is now owned by `self`, so a strong capture here
-            // would cycle.
-            coordinator = AVCaptureDeviceDirectionCoordinator(view: nil, deviceTypes: deviceTypes) { [weak self] _ in
-                self?.sessionQueue.async { self?.reconfigureInput() }
-            }
-            directionCoordinator = coordinator
-        }
-        return selectDevice(from: coordinator, mode: mode)
-    }
-
-    // UNVERIFIED (2026-09-20, written on Windows): the shape of whatever map the direction
-    // coordinator exposes from device → facing side, and the `.away`/`.toward` case names.
-    // Isolated in this one method (per the spec) so the rest of the class doesn't depend on the
-    // exact API once it's checked against the real SDK. `.away` = faces away from the inner
-    // display the photographer looks at (partner mode); `.toward` = faces toward it (self mode).
-    @available(iOS 27.1, *)
-    private func selectDevice(from coordinator: AVCaptureDeviceDirectionCoordinator, mode: CaptureMode) -> AVCaptureDevice? {
-        let wanted: AVCaptureDeviceDirectionCoordinator.Facing = mode == .partner ? .away : .toward
-        return coordinator.devices.first { coordinator.facing(for: $0) == wanted }
     }
 
     // MARK: - Adjustments
@@ -215,10 +220,17 @@ final class CameraService: NSObject, @unchecked Sendable {
             defer { device.unlockForConfiguration() }
 
             if setExposure {
-                device.setExposureTargetBias(Float(adjustments.exposureEV), completionHandler: nil)
+                // Clamped: `exposureEV` (`Adjustments`) ranges -2...2, but a device's own bias range
+                // can be narrower, and `setExposureTargetBias` throws an ObjC exception for a value
+                // outside it.
+                let bias = min(max(Float(adjustments.exposureEV), device.minExposureTargetBias), device.maxExposureTargetBias)
+                device.setExposureTargetBias(bias, completionHandler: nil)
             }
 
-            if setWarmth {
+            // Guarded: `setWhiteBalanceModeLocked(with:)` throws an ObjC exception (not a Swift
+            // `throw`, so `catch` below can't save it) on a device that doesn't support custom-gain
+            // white balance locking at all.
+            if setWarmth, device.isLockingWhiteBalanceWithCustomDeviceGainsSupported {
                 let values = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(
                     temperature: Float(adjustments.warmthKelvin), tint: 0
                 )
@@ -238,9 +250,18 @@ final class CameraService: NSObject, @unchecked Sendable {
     func capturePhoto() async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             sessionQueue.async { [self] in
+                // Horizon-level rotation for this one shot, per the current device's coordinator —
+                // the live preview's connection instead keeps the fixed angle from
+                // `configureConnections()`.
+                if let connection = photoOutput.connection(with: .video), let rotationCoordinator {
+                    let angle = rotationCoordinator.videoRotationAngleForHorizonLevelCapture
+                    if connection.isVideoRotationAngleSupported(angle) {
+                        connection.videoRotationAngle = angle
+                    }
+                }
                 let settings = AVCapturePhotoSettings()
                 let delegate = PhotoCaptureDelegate { [self] result in
-                    sessionQueue.async { activePhotoCapture = nil }
+                    sessionQueue.async { [self] in self.activePhotoCapture = nil }
                     continuation.resume(with: result)
                 }
                 activePhotoCapture = delegate

@@ -13,6 +13,10 @@ struct PoseEditorView: View {
 
     @State private var name: String
     @State private var pose: Pose
+    /// A frozen snapshot of `model.previewImage` taken once, on appear — the editor draws and sizes
+    /// from this instead of the live feed, so the backdrop (and the joint handles positioned
+    /// against it) don't keep shifting under the photographer's finger while they drag.
+    @State private var frozenImage: CGImage?
 
     init(template: PoseTemplate) {
         original = template
@@ -23,12 +27,12 @@ struct PoseEditorView: View {
     var body: some View {
         NavigationStack {
             GeometryReader { proxy in
-                let imageSize = model.previewImage.map { CGSize(width: $0.width, height: $0.height) } ?? proxy.size
+                let imageSize = frozenImage.map { CGSize(width: $0.width, height: $0.height) } ?? proxy.size
                 let rect = PreviewLayout.aspectFillRect(imageSize: imageSize, in: CGRect(origin: .zero, size: proxy.size))
 
                 ZStack {
                     Theme.Palette.paper.ignoresSafeArea()
-                    if let image = model.previewImage {
+                    if let image = frozenImage {
                         Image(decorative: image, scale: 1)
                             .resizable()
                             .aspectRatio(contentMode: .fill)
@@ -47,6 +51,7 @@ struct PoseEditorView: View {
                 .frame(width: proxy.size.width, height: proxy.size.height)
                 .coordinateSpace(.named("editor"))
             }
+            .onAppear { frozenImage = model.previewImage }
             .navigationTitle("Edit Pose")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

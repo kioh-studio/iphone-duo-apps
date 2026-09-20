@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import Observation
 import PoseCore
@@ -72,7 +73,11 @@ final class StudioModel {
         didSet {
             guard captureMode != oldValue else { return }
             UserDefaults.standard.set(captureMode.rawValue, forKey: Self.captureModeKey)
-            if captureMode == .selfPortrait { isOuterEnabled = false }
+            if captureMode == .selfPortrait {
+                isOuterEnabled = false
+            } else {
+                isOuterEnabled = true
+            }
             camera.setMode(captureMode)
         }
     }
@@ -127,11 +132,21 @@ final class StudioModel {
         camera.stop()
     }
 
+    /// Forwarded from `CameraDirectionAnchor`'s coordinator change handler (`DUO_DIRECTION_COORDINATOR`
+    /// builds only) whenever the Duo's forward/backward-facing devices change.
+    func updateCameraDirections(forwardIDs: [String], backwardIDs: [String]) {
+        camera.setDirectionalDevices(forwardIDs: forwardIDs, backwardIDs: backwardIDs)
+    }
+
     // MARK: - Frame ingestion
 
-    /// Called once per processed frame, hopped onto `MainActor` by `FrameProcessor`.
+    /// Called once per processed frame, hopped onto `MainActor` by `FrameProcessor`. The preview
+    /// image updates every frame; `livePose`/`match` only update on Vision-detection frames (every
+    /// 3rd — see `FrameProcessor`), since `result.pose` is always `nil` on the frames in between and
+    /// clearing the skeleton on 2 out of every 3 frames is what caused the flicker.
     func receive(_ result: FrameResult) {
         previewImage = result.image
+        guard result.isDetectionFrame else { return }
         livePose = result.pose
         match = computeMatch(livePose: result.pose)
 

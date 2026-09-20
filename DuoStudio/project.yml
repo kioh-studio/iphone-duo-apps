@@ -6,8 +6,15 @@
 # studio state can be unit tested without a simulator.
 #
 # Requires Xcode 27.1 beta (iOS 27.1 SDK): the app sources reference `.sceneAccessory` /
-# `CameraCaptureAccessory` and `AVCaptureDeviceDirectionCoordinator`, gated behind
-# `if #available(iOS 27.1, *)` everywhere they're used, with a non-Duo fallback path.
+# `CameraCaptureAccessory`, gated behind `if #available(iOS 27.1, *)` everywhere it's used, with a
+# non-Duo fallback path.
+#
+# `DUO_DIRECTION_COORDINATOR` (Swift compiler flag, OFF by default — not set anywhere in this
+# file): guards the real `AVCaptureDeviceDirectionCoordinator` integration in
+# `Sources/Views/CameraDirectionAnchor.swift`. Off, the app always falls back to the classic
+# wide-angle front/back cameras. Turn it on (e.g. `OTHER_SWIFT_FLAGS: -DDUO_DIRECTION_COORDINATOR`
+# under a target's `settings`) only after confirming the coordinator's shape on a Mac with Xcode
+# 27.1 — see backlog.md.
 #
 # UNVERIFIED (2026-09-20): written on Windows with no Xcode/xcodegen toolchain to verify against —
 # confirm on a Mac that `xcodegen generate` produces a working project and that it builds & runs.
