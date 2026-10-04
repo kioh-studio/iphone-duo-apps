@@ -90,7 +90,7 @@ final class SimulatedFrameSource: CaptureSource, @unchecked Sendable {
     func capturePhoto() async throws -> Data {
         guard let image = state.withLock({ $0.lastImage }),
               let colorSpace = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB),
-              let data = ciContext.jpegRepresentation(of: image, format: .RGBA8, colorSpace: colorSpace)
+              let data = ciContext.jpegRepresentation(of: image, colorSpace: colorSpace)
         else {
             throw CameraServiceError.captureFailed
         }
@@ -117,7 +117,7 @@ final class SimulatedFrameSource: CaptureSource, @unchecked Sendable {
         ciImage = ciImage.applyingFilter("CIColorControls", parameters: [kCIInputContrastKey: contrast])
 
         guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
-        state.withLock { $0.lastImage = ciImage }
+        state.withLock { [ciImage] in $0.lastImage = ciImage }
 
         let result = FrameResult(image: cgImage, pose: pose, hand: hand, isDetectionFrame: true)
         // Snapshot the weak reference to a local `let` first, same reasoning as `FrameProcessor`:
