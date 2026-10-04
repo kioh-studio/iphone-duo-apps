@@ -156,7 +156,7 @@ final class FrameProcessor: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         return (pose, hand)
     }
 
-    private static func vnJoint(for bodyJoint: Joint) -> VNHumanBodyPoseObservation.JointName {
+    private static func vnJoint(for bodyJoint: PoseCore.Joint) -> VNHumanBodyPoseObservation.JointName {
         switch bodyJoint {
         case .nose: return .nose
         case .neck: return .neck
@@ -179,8 +179,8 @@ final class FrameProcessor: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
     /// Vision's normalized points have their origin bottom-left; `PoseCore.Point2` (and the whole
     /// app) uses top-left, so `y` is flipped on the way in.
     private func bodyPose(from observation: VNHumanBodyPoseObservation) -> Pose? {
-        var joints: [Joint: Point2] = [:]
-        for poseJoint in Joint.allCases {
+        var joints: [PoseCore.Joint: Point2] = [:]
+        for poseJoint in PoseCore.Joint.allCases {
             let vnJoint = Self.vnJoint(for: poseJoint)
             guard let point = try? observation.recognizedPoint(vnJoint), point.confidence > Self.minConfidence else { continue }
             joints[poseJoint] = Point2(x: Double(point.location.x), y: 1 - Double(point.location.y))

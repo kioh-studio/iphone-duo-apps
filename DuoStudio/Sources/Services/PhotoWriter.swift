@@ -12,9 +12,9 @@ enum PhotoWriterError: Error {
 /// .apply(_:)` sets them on the device before capture — so only the filter and contrast (which have
 /// no device equivalent) need reapplying here.
 enum PhotoWriter {
-    /// `nonisolated(unsafe)`: `CIContext` is documented thread-safe for concurrent use across
-    /// multiple threads, so a single shared instance needs no actor/queue confinement of its own.
-    nonisolated(unsafe) private static let context = CIContext()
+    /// `CIContext` is `Sendable` (documented thread-safe for concurrent use), so a single shared
+    /// instance needs no actor/queue confinement of its own.
+    private static let context = CIContext()
 
     static func write(_ data: Data, filter: StudioFilter, contrast: Double) async throws {
         // No filter and no contrast change: save the original capture untouched, so it keeps its

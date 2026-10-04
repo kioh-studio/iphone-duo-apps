@@ -42,7 +42,7 @@ struct PoseEditorView: View {
                     }
                     SkeletonOverlay(livePose: pose, template: nil, match: nil, imageSize: imageSize)
 
-                    ForEach(Joint.allCases, id: \.self) { joint in
+                    ForEach(PoseCore.Joint.allCases, id: \.self) { joint in
                         if let point = pose.joints[joint] {
                             handle(for: joint, at: PreviewLayout.point(point, in: rect), rect: rect)
                         }
@@ -73,7 +73,7 @@ struct PoseEditorView: View {
     /// coordinate space (set on the `ZStack` above), not the handle's own local frame — otherwise
     /// a handle that has already moved away from its start point would report drag locations
     /// relative to its *current* position instead of the shared preview frame.
-    private func handle(for joint: Joint, at center: CGPoint, rect: CGRect) -> some View {
+    private func handle(for joint: PoseCore.Joint, at center: CGPoint, rect: CGRect) -> some View {
         Circle()
             .fill(Theme.Palette.accent)
             .frame(width: Theme.Space.hitTarget, height: Theme.Space.hitTarget)

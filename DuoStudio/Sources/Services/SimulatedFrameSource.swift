@@ -237,7 +237,7 @@ final class SimulatedFrameSource: CaptureSource, @unchecked Sendable {
         let boneColor = oklchColor(l: 0.88, c: 0.19, h: 125, colorSpace: colorSpace) // Theme.Palette.accent
         let jointColor = oklchColor(l: 0.96, c: 0.003, h: 260, colorSpace: colorSpace) // Theme.Palette.ink
 
-        func point(_ joint: Joint) -> CGPoint? {
+        func point(_ joint: PoseCore.Joint) -> CGPoint? {
             guard let p = pose.joints[joint] else { return nil }
             let x = mirrored ? 1 - p.x : p.x
             return CGPoint(x: CGFloat(x) * imageSize.width, y: CGFloat(p.y) * imageSize.height)
@@ -254,7 +254,7 @@ final class SimulatedFrameSource: CaptureSource, @unchecked Sendable {
         context.strokePath()
 
         context.setFillColor(jointColor)
-        for joint in Joint.allCases {
+        for joint in PoseCore.Joint.allCases {
             guard let p = point(joint) else { continue }
             context.fillEllipse(in: CGRect(x: p.x - 8, y: p.y - 8, width: 16, height: 16))
         }
