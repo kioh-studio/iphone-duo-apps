@@ -241,6 +241,25 @@ nothing about a real camera's behavior (exposure/white-balance/rotation/mirrorin
 selection), and nothing about the Duo's outer display or direction coordinator specifically — see
 `backlog.md` for the real-device verification this still owes.
 
+### Video mode
+
+If the app bundle contains `SimulatorSample.mp4` (looked up via `Bundle.main`), `SimulatedFrameSource`
+runs in video mode instead; the stick figure above is the fallback when the file is absent.
+
+- An `AVAssetReader` loops the clip (reopened at end of file) from the same `timerQueue`, ticking at
+  a fixed ~30 fps (the clip's `nominalFrameRate` is ignored).
+- Each frame goes through the real `FrameProcessor` via `process(upright:time:)` — the same
+  filter/contrast, frame drop, Vision body + hand detection and `MainActor` delivery as on device.
+  `SimulatedFrameSource` just owns a `FrameProcessor` and forwards `model` / `updateFilter`.
+- `time` is monotonic elapsed uptime, not the video PTS: PTS resets each loop and
+  `GestureRecognizer` needs time that never runs backwards.
+- `lastImage` (what `capturePhoto()` encodes) is the unfiltered frame, matching device, where
+  `PhotoWriter` bakes filter + contrast in afterwards.
+- Self-portrait mode mirrors the frame horizontally before Vision, as the stick figure does.
+- `project.yml` sets `EXCLUDED_SOURCE_FILE_NAMES[sdk=iphoneos*]: SimulatorSample.mp4` so the clip
+  never ships to devices; the file is git-ignored (`DuoStudio/Resources/SimulatorSample.mp4`).
+- Ceiling: the clip must already be upright portrait — `preferredTransform` is not applied.
+
 ## Out of scope
 
 See root `backlog.md` for everything deferred: Mac build verification, on-device hand-gesture

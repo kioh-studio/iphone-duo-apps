@@ -29,8 +29,9 @@ struct FrameResult: @unchecked Sendable {
 /// entirely (no render, no detection) rather than queued — see `CameraState.isDelivering` and
 /// `plan.md`'s frame drop policy.
 ///
-/// `@unchecked Sendable`: `frameCount` and `ciContext` are only ever touched from `videoQueue`
-/// (the queue `CameraService` registers this delegate on), so there's no concurrent access to
+/// `@unchecked Sendable`: `frameCount` and `ciContext` are only ever touched from the single
+/// serial queue that drives this processor — `CameraService`'s `videoQueue` on device, or
+/// `SimulatedFrameSource`'s `timerQueue` in the Simulator — so there's no concurrent access to
 /// guard against. `cameraState` is the one piece of state written from elsewhere (`StudioModel` on
 /// `MainActor`, for filter/contrast) and read here, so it goes through `OSAllocatedUnfairLock`
 /// instead of being a plain stored property.
@@ -76,13 +77,20 @@ final class FrameProcessor: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
 
-        let (filter, contrast) = cameraState.withLock { ($0.filter, $0.contrast) }
-
         // Already upright and un-mirrored: `CameraService.configureConnections()` sets the video
         // data output connection's `videoRotationAngle`/`isVideoMirrored` to match PoseCore's
         // "upright, un-mirrored" coordinate convention (see `Pose.swift`), so no per-frame
         // orientation guess is needed here.
-        let upright = CIImage(cvPixelBuffer: pixelBuffer)
+        process(upright: CIImage(cvPixelBuffer: pixelBuffer), time: time)
+    }
+
+    /// Everything after frame capture: filter/contrast, frame counting, delivery guard, Vision,
+    /// render, and the `MainActor` hop. `upright` must already be upright and un-mirrored
+    /// (PoseCore's convention). `time` must be monotonic across calls — `GestureRecognizer`
+    /// compares it. Shared by `captureOutput` and the Simulator's video-backed
+    /// `SimulatedFrameSource`; call it from a single serial queue only (see the class doc).
+    func process(upright: CIImage, time: TimeInterval) {
+        let (filter, contrast) = cameraState.withLock { ($0.filter, $0.contrast) }
         var ciImage = upright
 
         if let filterName = filter.coreImageName {

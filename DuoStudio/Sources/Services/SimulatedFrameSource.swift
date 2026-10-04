@@ -1,4 +1,5 @@
 #if targetEnvironment(simulator)
+import AVFoundation
 import CoreGraphics
 import CoreImage
 import Dispatch
@@ -7,22 +8,38 @@ import os
 import PoseCore
 
 /// A synthetic `CaptureSource` for the iOS Simulator, which has no camera and would otherwise show
-/// a black preview with none of the pose/gesture UI exercisable. Feeds the real pipeline
-/// (`StudioModel.receive(_:)`) a procedurally drawn frame ~10 times a second, a slowly perturbed
-/// built-in pose, and a looping canned hand-gesture script — see `DuoStudio/plan.md`'s Simulator
-/// section for exactly what this does and doesn't prove.
+/// a black preview with none of the pose/gesture UI exercisable. Two modes, picked once by whether
+/// the bundle contains `SimulatorSample.mp4`:
+/// - **Video mode** (file present): loops the clip as the camera feed (~30 fps) and runs the real
+///   Vision pipeline on it via `FrameProcessor.process(upright:time:)`.
+/// - **Stick-figure fallback** (file absent): feeds `StudioModel.receive(_:)` a procedurally drawn
+///   frame ~10 times a second, a slowly perturbed built-in pose, and a looping canned hand-gesture
+///   script.
+///
+/// See `DuoStudio/plan.md`'s Simulator section for exactly what this does and doesn't prove.
 ///
 /// `@unchecked Sendable`: every stored mutable property lives in `State`, guarded by
 /// `OSAllocatedUnfairLock` — the same primitive `FrameProcessor.cameraState` already uses for
 /// state written from `MainActor` and read from a background queue. `timer` is the one property
-/// outside that lock; it's only ever touched from `timerQueue`, and `start()`/`stop()` both hop
+/// outside that lock, as are `reader`, `readerOutput` and `startUptime` (video mode); they're only
+/// ever touched from `timerQueue`, and `start()`/`stop()` both hop
 /// onto `timerQueue` before touching it, mirroring `CameraService`'s own "every public method
 /// re-enters its queue before touching state" discipline. `ciContext` is documented thread-safe
 /// for concurrent use (see `PhotoWriter`'s identical reasoning for its own shared `CIContext`).
 final class SimulatedFrameSource: CaptureSource, @unchecked Sendable {
     /// Set once by `StudioModel` right after construction — same pattern, and the same reasoning
-    /// for `weak` plus hopping to `MainActor` before use, as `FrameProcessor.model`.
-    weak var model: StudioModel?
+    /// for `weak` plus hopping to `MainActor` before use, as `FrameProcessor.model`. Also forwarded
+    /// to `videoProcessor` in video mode, which does its own delivery to the model.
+    weak var model: StudioModel? { didSet { videoProcessor?.model = model } }
+
+    private static let sampleVideoURL = Bundle.main.url(forResource: "SimulatorSample", withExtension: "mp4")
+    /// Video mode only (non-nil iff `SimulatorSample.mp4` is in the bundle): the real Vision
+    /// pipeline, driven from `timerQueue` — the single serial queue it requires.
+    private let videoProcessor: FrameProcessor?
+
+    init() {
+        videoProcessor = Self.sampleVideoURL == nil ? nil : FrameProcessor()
+    }
 
     private struct State {
         var mode: CaptureMode = .partner
@@ -43,6 +60,11 @@ final class SimulatedFrameSource: CaptureSource, @unchecked Sendable {
     private let timerQueue = DispatchQueue(label: "tech.kioh.duostudio.simulator")
     /// `timerQueue`-confined: only ever read or written after `start()`/`stop()` hop onto the queue.
     private var timer: DispatchSourceTimer?
+    /// Video mode, `timerQueue`-confined like `timer`. Known ceiling: the video must already be
+    /// upright portrait — its track's `preferredTransform` is not applied.
+    private var reader: AVAssetReader?
+    private var readerOutput: AVAssetReaderTrackOutput?
+    private var startUptime: TimeInterval = 0
     private let ciContext = CIContext()
 
     private static let sampleInterval: TimeInterval = 0.1
@@ -53,8 +75,16 @@ final class SimulatedFrameSource: CaptureSource, @unchecked Sendable {
         timerQueue.async { [self] in
             guard timer == nil else { return }
             let source = DispatchSource.makeTimerSource(queue: timerQueue)
-            source.schedule(deadline: .now(), repeating: Self.sampleInterval)
-            source.setEventHandler { [weak self] in self?.tick() }
+            if videoProcessor != nil {
+                // ponytail: fixed 30 fps, ignores the clip's nominalFrameRate; read it from the
+                // track if a clip with another rate looks sped up or slowed down.
+                source.schedule(deadline: .now(), repeating: 1.0 / 30)
+                source.setEventHandler { [weak self] in self?.tickVideo() }
+                startUptime = ProcessInfo.processInfo.systemUptime
+            } else {
+                source.schedule(deadline: .now(), repeating: Self.sampleInterval)
+                source.setEventHandler { [weak self] in self?.tick() }
+            }
             timer = source
             source.resume()
         }
@@ -64,6 +94,9 @@ final class SimulatedFrameSource: CaptureSource, @unchecked Sendable {
         timerQueue.async { [self] in
             timer?.cancel()
             timer = nil
+            reader?.cancelReading()
+            reader = nil
+            readerOutput = nil
         }
     }
 
@@ -85,6 +118,7 @@ final class SimulatedFrameSource: CaptureSource, @unchecked Sendable {
             $0.filter = filter
             $0.contrast = contrast
         }
+        videoProcessor?.updateFilter(filter, contrast: contrast)
     }
 
     func capturePhoto() async throws -> Data {
@@ -95,6 +129,56 @@ final class SimulatedFrameSource: CaptureSource, @unchecked Sendable {
             throw CameraServiceError.captureFailed
         }
         return data
+    }
+
+    // MARK: - Video mode (timerQueue)
+
+    private func tickVideo() {
+        if readerOutput == nil { openReader() }
+        guard readerOutput != nil else { return }
+        var sample = readerOutput?.copyNextSampleBuffer()
+        if sample == nil {
+            // End of clip: reopen and read once more — this is the loop.
+            openReader()
+            sample = readerOutput?.copyNextSampleBuffer()
+        }
+        guard let sample, let pixelBuffer = CMSampleBufferGetImageBuffer(sample) else { return }
+
+        var upright = CIImage(cvPixelBuffer: pixelBuffer)
+        // Mirror for self-portrait, like the stick figure does.
+        if state.withLock({ $0.mode }) == .selfPortrait {
+            upright = upright.transformed(
+                by: CGAffineTransform(scaleX: -1, y: 1).translatedBy(x: -upright.extent.width, y: 0)
+            )
+        }
+        // Unfiltered, matching device: `CameraService.capturePhoto()` returns an unfiltered capture
+        // and `PhotoWriter` bakes filter + contrast in afterwards.
+        state.withLock { [upright] in $0.lastImage = upright }
+
+        // Monotonic elapsed time, not the video PTS: PTS resets on every loop and
+        // `GestureRecognizer` needs time that never runs backwards.
+        videoProcessor?.process(upright: upright, time: ProcessInfo.processInfo.systemUptime - startUptime)
+    }
+
+    private func openReader() {
+        reader?.cancelReading()
+        reader = nil
+        readerOutput = nil
+        guard let url = Self.sampleVideoURL else { return }
+        let asset = AVURLAsset(url: url)
+        // UNVERIFIED (2026-10-04, written on Windows): sync tracks(withMediaType:) is deprecated in favor of async loadTracks; acceptable on this Simulator-only background queue
+        guard let track = asset.tracks(withMediaType: .video).first,
+              let newReader = try? AVAssetReader(asset: asset) else { return }
+        let output = AVAssetReaderTrackOutput(
+            track: track,
+            outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        )
+        output.alwaysCopiesSampleData = false
+        guard newReader.canAdd(output) else { return }
+        newReader.add(output)
+        guard newReader.startReading() else { return }
+        reader = newReader
+        readerOutput = output
     }
 
     // MARK: - Frame generation (timerQueue)
