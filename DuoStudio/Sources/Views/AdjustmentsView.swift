@@ -58,7 +58,7 @@ struct AdjustmentsView: View {
     }
 
     private func slider(
-        for parameter: StudioParameter, range: ClosedRange<Double>, step: Double, get: @escaping () -> Double
+        for parameter: StudioParameter, range: ClosedRange<Double>, step: Double, get: @escaping @MainActor @Sendable () -> Double
     ) -> some View {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             HStack {
