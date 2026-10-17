@@ -31,7 +31,8 @@ private func pose(armUp: Bool) -> Pose {
         // At t = 0.6 the window is [0.25, 0.6] → only the armUp frame at 0.5. A dancer still
         // holding armUp scores 1.
         let match = scorer.record(live: pose(armUp: true), at: 0.6, routine: routine)!
-        #expect(abs(match.score - 1) < 1e-9)
+        // 1e-6, not 1e-9: acos() near cos = 1 turns a 1-ulp dot-product error into ~1e-8 rad.
+        #expect(abs(match.score - 1) < 1e-6)
 
         // At t = 0.7 the window is [0.35, 0.7] → still only armUp at 0.5; a dancer who is
         // late (armDown) scores below 1.
@@ -41,7 +42,7 @@ private func pose(armUp: Bool) -> Pose {
         // At t = 0.3 the window [0, 0.3] holds the armDown frame: the dancer who hasn't moved yet
         // still scores 1 against it — the lag tolerance.
         let lagged = scorer.record(live: pose(armUp: false), at: 0.3, routine: routine)!
-        #expect(abs(lagged.score - 1) < 1e-9)
+        #expect(abs(lagged.score - 1) < 1e-6)
     }
 
     @Test func averageAndSampleCount() {
@@ -50,7 +51,7 @@ private func pose(armUp: Bool) -> Pose {
         _ = scorer.record(live: pose(armUp: true), at: 0.6, routine: routine)   // 1.0
         let second = scorer.record(live: pose(armUp: false), at: 0.7, routine: routine)!
         #expect(scorer.sampleCount == 2)
-        #expect(abs(scorer.average! - (1 + second.score) / 2) < 1e-9)
+        #expect(abs(scorer.average! - (1 + second.score) / 2) < 1e-6)
     }
 
     @Test func nothingComparableIsNotCounted() {
