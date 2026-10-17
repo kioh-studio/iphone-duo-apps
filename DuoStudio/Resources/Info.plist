@@ -37,7 +37,9 @@
 	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>Duo Studio uses the camera to take photos and to show your subject a live preview and pose guide. Video never leaves this iPhone.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Duo Studio records sound with your videos. Audio never leaves this iPhone.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Duo Studio saves the photos you take to your library.</string>
+	<string>Duo Studio saves the photos and videos you take to your library.</string>
 </dict>
 </plist>

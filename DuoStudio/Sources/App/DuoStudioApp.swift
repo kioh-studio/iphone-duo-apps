@@ -6,11 +6,8 @@ struct DuoStudioApp: App {
 
     var body: some Scene {
         WindowGroup {
-            StudioView()
+            RootView()
                 .environment(model)
-                .preferredColorScheme(.dark)
-                .tint(Theme.Palette.accent)
-                .task { await model.requestCameraAccess() }
         }
     }
 }

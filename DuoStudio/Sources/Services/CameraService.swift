@@ -3,6 +3,8 @@ import PoseCore
 
 enum CameraServiceError: Error {
     case captureFailed
+    /// The Simulator's stick-figure fallback has no real frames to record.
+    case recordingUnsupported
 }
 
 /// Wraps the `AVCaptureSession` that feeds the live preview, the pose/hand pipeline (via
@@ -10,17 +12,23 @@ enum CameraServiceError: Error {
 ///
 /// `@unchecked Sendable`: every stored mutable property (`session`, `videoDeviceInput`, `mode`,
 /// `isConfigured`, `activePhotoCapture`, `forwardDeviceIDs`, `backwardDeviceIDs`,
-/// `rotationCoordinator`, `lastAppliedAdjustments`) is only ever touched from `sessionQueue`, a
+/// `rotationCoordinator`, `lastAppliedAdjustments`, `isVideoShoot`, `recordsAudio`, `audioInput`,
+/// `isInterview`, `dualActive`, `dualDisabled`, `interviewerInput`, `dualHandler`) is only ever touched from `sessionQueue`, a
 /// private serial queue — never from `MainActor` or from `videoQueue` (which only ever sees the
 /// already-configured, effectively-immutable `AVCaptureVideoDataOutput`). Every public method
 /// re-enters `sessionQueue` before touching state, so nothing here is read concurrently with a
-/// write.
+/// write. `session` itself is one of them: the Interview guide swaps it for an
+/// `AVCaptureMultiCamSession` (and back), so it is a `var` replaced only on `sessionQueue`.
 final class CameraService: NSObject, CaptureSource, @unchecked Sendable {
-    private let session = AVCaptureSession()
+    private var session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "tech.kioh.duostudio.session")
     private let videoQueue = DispatchQueue(label: "tech.kioh.duostudio.video")
     private let videoOutput = AVCaptureVideoDataOutput()
     private let photoOutput = AVCapturePhotoOutput()
+    private let audioOutput = AVCaptureAudioDataOutput()
+    /// Interview guide: the interviewer camera's output and its frame sink (latest frame only).
+    private let secondaryOutput = AVCaptureVideoDataOutput()
+    private let secondarySink = SecondaryFrameSink()
     private let frameProcessor: FrameProcessor
 
     private var videoDeviceInput: AVCaptureDeviceInput?
@@ -42,6 +50,20 @@ final class CameraService: NSObject, CaptureSource, @unchecked Sendable {
     /// knob that changed (see `apply(_:)`) and `reconfigureInput()` knows whether warmth was ever
     /// touched away from its default.
     private var lastAppliedAdjustments = Adjustments()
+    /// Video shoot kind: 1080p preset (instead of `.photo`) and, when `recordsAudio`, a microphone
+    /// input + audio data output. Set by `setVideoConfiguration`; applied by `configureSession()`
+    /// (first build) or `applyVideoConfiguration()` (live session).
+    private var isVideoShoot = false
+    private var recordsAudio = false
+    private var audioInput: AVCaptureDeviceInput?
+    /// Interview guide requested (video kind + `.interview`), and whether the current `session` is
+    /// really a dual-camera one. `dualDisabled`: dual mode failed to start once this run, so later
+    /// rebuilds go straight to the guest-only fallback instead of retrying.
+    private var isInterview = false
+    private var dualActive = false
+    private var dualDisabled = false
+    private var interviewerInput: AVCaptureDeviceInput?
+    private var dualHandler: (@Sendable (Bool) -> Void)?
 
     init(frameProcessor: FrameProcessor) {
         self.frameProcessor = frameProcessor
@@ -59,14 +81,25 @@ final class CameraService: NSObject, CaptureSource, @unchecked Sendable {
         }
     }
 
+    static func requestMicrophoneAuthorization() async -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            return true
+        case .notDetermined:
+            return await AVCaptureDevice.requestAccess(for: .audio)
+        default:
+            return false
+        }
+    }
+
     func start() {
         sessionQueue.async { [self] in
             if !isConfigured {
-                configureSession()
+                buildSession()
                 isConfigured = true
             }
             guard !session.isRunning else { return }
-            session.startRunning()
+            startSession()
         }
     }
 
@@ -102,11 +135,111 @@ final class CameraService: NSObject, CaptureSource, @unchecked Sendable {
         }
     }
 
+    /// Photo shoot: `.photo` preset, no microphone. Video shoot: 1080p preset (portrait 1080×1920
+    /// after the 90° connection rotation), plus the microphone when `recordsAudio`. Safe before the
+    /// session is built — it just records the values for `configureSession()`.
+    ///
+    /// Interview (`interview` while `isVideo`): the session is rebuilt as a multi-camera one (or
+    /// back). Never call this mid-recording - `StudioModel` guards that.
+    func setVideoConfiguration(isVideo: Bool, recordsAudio: Bool, interview: Bool) {
+        sessionQueue.async { [self] in
+            let wantsInterview = isVideo && interview
+            let changed = isVideoShoot != isVideo || self.recordsAudio != recordsAudio || isInterview != wantsInterview
+            let interviewChanged = isInterview != wantsInterview
+            isVideoShoot = isVideo
+            self.recordsAudio = recordsAudio
+            isInterview = wantsInterview
+            guard isConfigured, changed else { return }
+            // A dual session has manual connections, so any change (including the microphone
+            // arriving) rebuilds it rather than patching it in place.
+            if interviewChanged || dualActive {
+                rebuildSession()
+            } else {
+                applyVideoConfiguration()
+            }
+        }
+    }
+
+    func setDualCaptureHandler(_ handler: @escaping @Sendable (Bool) -> Void) {
+        sessionQueue.async { [self] in dualHandler = handler }
+    }
+
+    /// Starts writing processed frames (and mic audio, when `includeAudio` and an audio input is
+    /// actually attached) to a temp `.mp4`. Hops through `sessionQueue` so it lands after any
+    /// pending `setVideoConfiguration`.
+    func startRecording(includeAudio: Bool) async throws {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            sessionQueue.async { [self] in
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).mp4")
+                frameProcessor.recorder.start(url: url, includeAudio: includeAudio && audioInput != nil)
+                continuation.resume()
+            }
+        }
+    }
+
+    func stopRecording() async throws -> URL {
+        try await frameProcessor.recorder.finish()
+    }
+
     // MARK: - Session configuration (sessionQueue only)
+
+    /// Builds `session` for the current request: the dual-camera Interview session when asked for
+    /// and possible, otherwise the regular single-camera one (which is also the Interview
+    /// guest-only fallback). Leaves the session configured but not started. Reports the outcome to
+    /// `dualHandler` when Interview was requested.
+    private func buildSession() {
+        dualActive = false
+        frameProcessor.setInterviewSink(nil)
+        secondarySink.clear()
+        if isInterview, !dualDisabled, let multi = makeDualSession() {
+            session = multi
+            dualActive = true
+            configureConnections()
+            frameProcessor.setInterviewSink(secondarySink)
+        } else {
+            session = AVCaptureSession()
+            configureSession()
+        }
+        if isInterview { dualHandler?(dualActive) }
+    }
+
+    /// Starts `session`; if a dual session doesn't come up running, falls back to guest-only.
+    private func startSession() {
+        session.startRunning()
+        guard dualActive, !session.isRunning else { return }
+        // ponytail: one-way fallback for this run; retry (or lower activeFormat) if device testing
+        // shows dual mode failing transiently.
+        dualDisabled = true
+        tearDown(session)
+        buildSession()
+        session.startRunning()
+    }
+
+    /// Replaces `session` (Interview entered/left, or the dual pair changed), restarting it if the
+    /// old one was running.
+    private func rebuildSession() {
+        let wasRunning = session.isRunning
+        tearDown(session)
+        buildSession()
+        if wasRunning { startSession() }
+    }
+
+    /// Stops `old` and detaches everything from it so the shared outputs can join the next session.
+    private func tearDown(_ old: AVCaptureSession) {
+        if old.isRunning { old.stopRunning() }
+        old.beginConfiguration()
+        for input in old.inputs { old.removeInput(input) }
+        for output in old.outputs { old.removeOutput(output) }
+        old.commitConfiguration()
+        videoDeviceInput = nil
+        interviewerInput = nil
+        audioInput = nil
+        rotationCoordinator = nil
+    }
 
     private func configureSession() {
         session.beginConfiguration()
-        session.sessionPreset = .photo
+        applyPreset()
         defer { session.commitConfiguration() }
 
         addInput(for: mode)
@@ -122,6 +255,184 @@ final class CameraService: NSObject, CaptureSource, @unchecked Sendable {
             session.addOutput(photoOutput)
         }
 
+        updateAudio()
+        configureConnections()
+    }
+
+    // MARK: - Interview: dual-camera session (sessionQueue only)
+
+    /// Builds a configured `AVCaptureMultiCamSession`: guest camera -> `videoOutput` (the normal
+    /// `FrameProcessor` path), interviewer camera -> `secondaryOutput` (-> `secondarySink`), mic ->
+    /// `audioOutput`. Connections are made by hand (`...WithNoConnections` + explicit
+    /// `AVCaptureConnection`s), as multi-camera sessions require. Returns `nil` - leaving no
+    /// session state behind - when the device can't do it: no multi-cam support, the two cameras
+    /// aren't a supported pair, a connection can't be made, or `hardwareCost` exceeds 1.0.
+    /// No photo output: the Interview guide only records video.
+    private func makeDualSession() -> AVCaptureMultiCamSession? {
+        guard AVCaptureMultiCamSession.isMultiCamSupported,
+              let guest = selectDevice(for: .partner), let interviewer = selectDevice(for: .selfPortrait),
+              guest.uniqueID != interviewer.uniqueID, Self.isSupportedPair(guest, interviewer),
+              let guestInput = try? AVCaptureDeviceInput(device: guest),
+              let interviewerCameraInput = try? AVCaptureDeviceInput(device: interviewer)
+        else { return nil }
+
+        Self.selectMultiCamFormat(for: guest)
+        Self.selectMultiCamFormat(for: interviewer)
+
+        let multi = AVCaptureMultiCamSession()
+        multi.beginConfiguration()
+
+        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        videoOutput.alwaysDiscardsLateVideoFrames = true
+        videoOutput.setSampleBufferDelegate(frameProcessor, queue: videoQueue)
+        secondaryOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        secondaryOutput.alwaysDiscardsLateVideoFrames = true
+        secondaryOutput.setSampleBufferDelegate(secondarySink, queue: videoQueue)
+
+        var micInput: AVCaptureDeviceInput?
+        if recordsAudio, let mic = AVCaptureDevice.default(for: .audio), let input = try? AVCaptureDeviceInput(device: mic) {
+            micInput = input
+        }
+
+        guard multi.canAddInput(guestInput), multi.canAddInput(interviewerCameraInput),
+              multi.canAddOutput(videoOutput), multi.canAddOutput(secondaryOutput)
+        else {
+            multi.commitConfiguration()
+            tearDown(multi)
+            return nil
+        }
+        multi.addInputWithNoConnections(guestInput)
+        multi.addInputWithNoConnections(interviewerCameraInput)
+        multi.addOutputWithNoConnections(videoOutput)
+        multi.addOutputWithNoConnections(secondaryOutput)
+
+        var wired = Self.connect(guestInput, device: guest, to: videoOutput, in: multi)
+            && Self.connect(interviewerCameraInput, device: interviewer, to: secondaryOutput, in: multi)
+
+        var audio: AVCaptureDeviceInput?
+        if wired, let micInput, multi.canAddInput(micInput), multi.canAddOutput(audioOutput) {
+            multi.addInputWithNoConnections(micInput)
+            multi.addOutputWithNoConnections(audioOutput)
+            audioOutput.setSampleBufferDelegate(frameProcessor, queue: videoQueue)
+            if let port = micInput.ports.first(where: { $0.mediaType == .audio }) {
+                let connection = AVCaptureConnection(inputPorts: [port], output: audioOutput)
+                if multi.canAdd(connection) {
+                    multi.add(connection)
+                    audio = micInput
+                }
+            }
+            // A mic that can't be wired just means a silent interview; video still records.
+        }
+        multi.commitConfiguration()
+
+        // UNVERIFIED (2026-10-18, written on Windows): `hardwareCost` / `systemPressureCost` are
+        // read after commit; > 1.0 means the pair can't run together at the chosen formats.
+        // ponytail: lowering activeFormat would keep dual working on more devices; fall back for now.
+        wired = wired && multi.hardwareCost <= 1.0 && multi.systemPressureCost <= 1.0
+        guard wired else {
+            tearDown(multi)
+            return nil
+        }
+
+        videoDeviceInput = guestInput
+        interviewerInput = interviewerCameraInput
+        audioInput = audio
+        rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: guest, previewLayer: nil)
+        return multi
+    }
+
+    /// UNVERIFIED (2026-10-18, written on Windows): `supportedMultiCamDeviceSets` is queried for
+    /// wide/ultra-wide/TrueDepth device types only - whether the Duo's inner under-display camera
+    /// (the interviewer) appears under one of these types is unknown; if not, dual mode is simply
+    /// reported unavailable (guest-only fallback).
+    private static func isSupportedPair(_ a: AVCaptureDevice, _ b: AVCaptureDevice) -> Bool {
+        let discovery = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera, .builtInUltraWideCamera, .builtInTrueDepthCamera],
+            mediaType: .video, position: .unspecified
+        )
+        return discovery.supportedMultiCamDeviceSets.contains { $0.contains(a) && $0.contains(b) }
+    }
+
+    /// Multi-camera sessions ignore `sessionPreset`; the device's own format has to be one that
+    /// supports multi-cam. Picks the largest such format up to 1080p at 30 fps.
+    /// UNVERIFIED (2026-10-18, written on Windows): the inner camera's 1080p limit, and that
+    /// setting `activeFormat` before adding the input is the right order.
+    private static func selectMultiCamFormat(for device: AVCaptureDevice) {
+        let candidates = device.formats.filter { format in
+            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            return format.isMultiCamSupported
+                && max(dimensions.width, dimensions.height) <= 1920
+                && format.videoSupportedFrameRateRanges.contains { $0.minFrameRate <= 30 && $0.maxFrameRate >= 30 }
+        }
+        let best = candidates.max { lhs, rhs in
+            let l = CMVideoFormatDescriptionGetDimensions(lhs.formatDescription)
+            let r = CMVideoFormatDescriptionGetDimensions(rhs.formatDescription)
+            return Int(l.width) * Int(l.height) < Int(r.width) * Int(r.height)
+        }
+        guard let best, (try? device.lockForConfiguration()) != nil else { return }
+        defer { device.unlockForConfiguration() }
+        device.activeFormat = best
+        device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
+        device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
+    }
+
+    /// One manual video connection from `input`'s video port to `output`.
+    private static func connect(
+        _ input: AVCaptureDeviceInput, device: AVCaptureDevice, to output: AVCaptureVideoDataOutput,
+        in session: AVCaptureMultiCamSession
+    ) -> Bool {
+        guard let port = input.ports(
+            for: .video, sourceDeviceType: device.deviceType, sourceDevicePosition: device.position
+        ).first else { return false }
+        let connection = AVCaptureConnection(inputPorts: [port], output: output)
+        guard session.canAdd(connection) else { return false }
+        session.add(connection)
+        return true
+    }
+
+    /// sessionQueue-confined; call inside a begin/commitConfiguration pair.
+    private func applyPreset() {
+        if isVideoShoot, session.canSetSessionPreset(.hd1920x1080) {
+            session.sessionPreset = .hd1920x1080
+        } else if isVideoShoot {
+            session.sessionPreset = .high
+        } else {
+            session.sessionPreset = .photo
+        }
+    }
+
+    /// sessionQueue-confined; call inside a begin/commitConfiguration pair. Adds the microphone
+    /// input + audio data output when this is a video shoot that records sound, removes them
+    /// otherwise. The audio output's delegate queue is `videoQueue` — the same queue the video
+    /// output uses — so the recorder sees audio and video buffers in capture order.
+    private func updateAudio() {
+        if isVideoShoot && recordsAudio {
+            if audioInput == nil, let mic = AVCaptureDevice.default(for: .audio),
+               let input = try? AVCaptureDeviceInput(device: mic), session.canAddInput(input) {
+                session.addInput(input)
+                audioInput = input
+            }
+            if audioInput != nil, !session.outputs.contains(audioOutput), session.canAddOutput(audioOutput) {
+                // UNVERIFIED (2026-10-18, written on Windows): two outputs delivering to one serial
+                // queue + one delegate object is the documented pattern, but not checked against a
+                // running session.
+                audioOutput.setSampleBufferDelegate(frameProcessor, queue: videoQueue)
+                session.addOutput(audioOutput)
+            }
+        } else {
+            if session.outputs.contains(audioOutput) { session.removeOutput(audioOutput) }
+            if let input = audioInput {
+                session.removeInput(input)
+                audioInput = nil
+            }
+        }
+    }
+
+    private func applyVideoConfiguration() {
+        session.beginConfiguration()
+        applyPreset()
+        updateAudio()
+        session.commitConfiguration()
         configureConnections()
     }
 
@@ -138,6 +449,15 @@ final class CameraService: NSObject, CaptureSource, @unchecked Sendable {
     /// Also re-run whenever the direction coordinator reports new device IDs, so a Duo posture
     /// change (partner mode) picks up the same "which device does this mode want" logic.
     private func reconfigureInput() {
+        if dualActive {
+            // A dual session's inputs are wired by hand; swapping one in place isn't safe. Rebuild
+            // only when the pair of cameras actually changed (not on every coordinator report).
+            if selectDevice(for: .partner)?.uniqueID != videoDeviceInput?.device.uniqueID
+                || selectDevice(for: .selfPortrait)?.uniqueID != interviewerInput?.device.uniqueID {
+                rebuildSession()
+            }
+            return
+        }
         guard let device = selectDevice(for: mode), let input = try? AVCaptureDeviceInput(device: device) else { return }
         guard device.uniqueID != videoDeviceInput?.device.uniqueID else { return }
         session.beginConfiguration()
@@ -162,13 +482,16 @@ final class CameraService: NSObject, CaptureSource, @unchecked Sendable {
     /// orientation from device position. Re-run after both `configureSession()` and
     /// `reconfigureInput()`, since swapping the input can hand the output a fresh connection.
     private func configureConnections() {
-        guard let connection = videoOutput.connection(with: .video) else { return }
-        if connection.isVideoRotationAngleSupported(90) {
-            connection.videoRotationAngle = 90
-        }
-        if connection.isVideoMirroringSupported {
-            connection.automaticallyAdjustsVideoMirroring = false
-            connection.isVideoMirrored = false
+        // Interview: the interviewer camera's connection gets the same upright, un-mirrored rule.
+        for output in dualActive ? [videoOutput, secondaryOutput] : [videoOutput] {
+            guard let connection = output.connection(with: .video) else { continue }
+            if connection.isVideoRotationAngleSupported(90) {
+                connection.videoRotationAngle = 90
+            }
+            if connection.isVideoMirroringSupported {
+                connection.automaticallyAdjustsVideoMirroring = false
+                connection.isVideoMirrored = false
+            }
         }
     }
 
@@ -250,6 +573,11 @@ final class CameraService: NSObject, CaptureSource, @unchecked Sendable {
     func capturePhoto() async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             sessionQueue.async { [self] in
+                // The Interview session has no photo output.
+                guard session.outputs.contains(photoOutput) else {
+                    continuation.resume(throwing: CameraServiceError.captureFailed)
+                    return
+                }
                 // Horizon-level rotation for this one shot, per the current device's coordinator —
                 // the live preview's connection instead keeps the fixed angle from
                 // `configureConnections()`.

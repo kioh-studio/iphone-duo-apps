@@ -2,17 +2,28 @@ import SwiftUI
 import AVKit
 import PoseCore
 
-/// The photographer-facing screen. In partner mode this is the inner-display control surface
-/// (preview, template strip, shutter, filters/adjustments, outer/gesture toggles) with
-/// `SubjectView` mirrored out to the Duo's outer display via `OuterDisplayAccessory`. In
-/// self-portrait mode this screen instead reuses `SubjectView` itself as the backdrop, with a
-/// minimal control layer (mode switch, template picker, shutter) on top — see the ADDENDUM.
+/// The camera screen, one structure for every mode (top to bottom):
+/// 1. the preview, with a top bar of toggles on it (Outer, Gestures, Solo, the MATCH / REC readout,
+///    Skin);
+/// 2. the mode panel (`ModePanelView`: templates, hint, script, routines or the question card);
+/// 3. the mode dial (`ModeDialView`) with the mode's one-line summary;
+/// 4. the bottom row: Library, the shutter / record button, Controls.
+///
+/// In partner modes the preview is the un-mirrored working view with `SkeletonOverlay`, and
+/// `SubjectView` goes to the Duo's outer display via `OuterDisplayAccessory`. Selfie and Solo video
+/// use `SubjectView` itself as the preview (the user is the subject), with the same panel, dial and
+/// bottom row below it.
 struct StudioView: View {
     @Environment(StudioModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
 
-    @State private var isAdjustmentsPresented = false
+    @State private var isControlsPresented = false
+    @State private var isLibraryPresented = false
+    @State private var isSkinPickerPresented = false
+    @State private var isScriptEditorPresented = false
+    @State private var isQuestionsEditorPresented = false
     @State private var editingTemplate: PoseTemplate?
     @State private var flashOpacity: Double = 0
 
@@ -27,15 +38,18 @@ struct StudioView: View {
             .modifier(OuterDisplayAccessory(model: model))
             // UNVERIFIED (2026-09-20, written on Windows): `.onCameraCaptureEvent { event in }`
             // (AVKit, iOS 18+) — exact modifier name and `event.phase` shape for remote-shutter
-            // handling (volume buttons, Camera Control, Bluetooth remotes). Wired for both modes
-            // per the ADDENDUM. No self-timer, no gesture shutter.
+            // handling (volume buttons, Camera Control, Bluetooth remotes). Wired for every mode.
+            // No self-timer, no gesture shutter.
             //
             // `[model]`: an explicit capture list so the closure captures the `@Environment` value
             // itself rather than reading the (possibly nonisolated-context) `model` property off
             // `self` each time it's invoked.
             .onCameraCaptureEvent { [model] event in
                 guard event.phase == .ended else { return }
-                Task { await model.capture() }
+                Task { await model.remoteShutter() }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .background { model.stopRecordingIfNeeded() }
             }
             .sensoryFeedback(.impact, trigger: model.flashTrigger)
             .onChange(of: model.flashTrigger) { _, _ in
@@ -43,22 +57,38 @@ struct StudioView: View {
                 flashOpacity = 1
                 withAnimation(Theme.Motion.easeOut(Theme.Motion.shutterFlash)) { flashOpacity = 0 }
             }
-            .sheet(isPresented: $isAdjustmentsPresented) {
-                AdjustmentsView()
+            .sheet(isPresented: $isControlsPresented) {
+                ControlsView()
+            }
+            .sheet(isPresented: $isLibraryPresented) {
+                LibraryView()
+            }
+            .sheet(isPresented: $isSkinPickerPresented) {
+                SkinPickerSheet()
             }
             .sheet(item: $editingTemplate) { template in
                 PoseEditorView(template: template)
             }
+            .sheet(isPresented: $isScriptEditorPresented) {
+                ScriptEditorView()
+            }
+            .sheet(isPresented: $isQuestionsEditorPresented) {
+                QuestionsEditorView()
+            }
+            .sheet(item: savedClip) { clip in
+                SavedView(clip: clip)
+            }
             .overlay {
                 Theme.Palette.paper.opacity(flashOpacity).ignoresSafeArea().allowsHitTesting(false)
             }
-            .alert("Couldn't save the photo", isPresented: isShowingSaveError) {
+            .alert(model.errorMessage ?? "", isPresented: isShowingSaveError) {
                 Button("OK", role: .cancel) {}
             }
     }
 
-    /// Bridges `model.errorMessage` (set on a failed `capture()`/save) to `.alert`'s `Bool`
-    /// binding; dismissing the alert (button or swipe-away) clears the underlying message.
+    /// Bridges `model.errorMessage` (a failed photo/video save, import or recording start) to
+    /// `.alert`'s `Bool` binding - the message itself is the alert's title; dismissing the alert
+    /// (button or swipe-away) clears it.
     private var isShowingSaveError: Binding<Bool> {
         Binding(
             get: { model.errorMessage != nil },
@@ -66,38 +96,56 @@ struct StudioView: View {
         )
     }
 
+    /// `.sheet(item:)` binding for the "Saved to Photos" sheet; dismissing clears it.
+    private var savedClip: Binding<SavedClip?> {
+        Binding(get: { model.lastSaved }, set: { model.lastSaved = $0 })
+    }
+
     @ViewBuilder
     private var content: some View {
         if model.cameraAuthorization == .denied {
             deniedState
         } else {
-            switch model.captureMode {
-            case .partner:
-                partnerLayout
-            case .selfPortrait:
-                selfPortraitLayout
-            }
+            cameraLayout
         }
     }
 
-    // MARK: - Partner mode
+    // MARK: - Camera layout
 
-    private var partnerLayout: some View {
-        ZStack {
-            Theme.Palette.paper.ignoresSafeArea()
-            preview.ignoresSafeArea()
-            VStack {
-                topBar
-                Spacer()
-                bottomBar
-            }
+    private var cameraLayout: some View {
+        VStack(spacing: 0) {
+            previewArea
+            controls
         }
+        .background(Theme.Palette.paper.ignoresSafeArea())
+    }
+
+    private var previewArea: some View {
+        ZStack(alignment: .top) {
+            if model.captureMode == .selfPortrait {
+                SubjectView(isOuterDisplay: false)
+            } else {
+                preview
+            }
+            topBar
+        }
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card))
+        .padding(.horizontal, Theme.Space.md)
     }
 
     private var preview: some View {
         GeometryReader { proxy in
             ZStack {
-                if let image = model.previewImage {
+                if model.isInterviewVideo, let image = model.compositePreviewImage ?? model.previewImage {
+                    // Interview: exactly what is being recorded (the split-screen composite, or
+                    // the guest camera alone in the fallback). No skeleton - it would not line up
+                    // with the composite, and the guide shows none.
+                    Image(decorative: image, scale: 1)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .clipped()
+                } else if let image = model.previewImage {
                     Image(decorative: image, scale: 1)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
@@ -108,108 +156,193 @@ struct StudioView: View {
                         imageSize: CGSize(width: image.width, height: image.height)
                     )
                     .frame(width: proxy.size.width, height: proxy.size.height)
+                    if model.mode == .frame {
+                        FrameGuideOverlay(hint: model.frameHint, imageSize: CGSize(width: image.width, height: image.height))
+                            .frame(width: proxy.size.width, height: proxy.size.height)
+                    }
                 } else {
-                    Color.black
+                    Theme.Palette.overlayBase
                 }
             }
         }
     }
 
-    private var topBar: some View {
-        HStack(spacing: Theme.Space.md) {
-            modeSwitch
+    // MARK: - Top bar
 
-            Button {
+    /// Outer / Gestures / Solo toggles, then the MATCH or REC readout and the Skin button - each on
+    /// a `scrim` capsule with `overlayInk`, since they sit on live video.
+    private var topBar: some View {
+        HStack(spacing: Theme.Space.xs) {
+            toggleChip("Outer", symbol: "rectangle.portrait.on.rectangle.portrait", isOn: model.isOuterEnabled) {
                 model.isOuterEnabled.toggle()
-            } label: {
-                Image(systemName: "rectangle.portrait.on.rectangle.portrait")
             }
-            .disabled(!model.isOuterAvailable)
-            .opacity(model.isOuterAvailable ? 1 : 0.4)
-            .accessibilityLabel("Outer display")
-            .accessibilityValue(model.isOuterEnabled ? "On" : "Off")
+            .disabled(!model.isOuterAvailable || model.captureMode == .selfPortrait)
+            .opacity(model.isOuterAvailable && model.captureMode == .partner ? 1 : Theme.Opacity.disabled)
             .accessibilityHint(model.isOuterAvailable ? "" : "Not available on this iPhone")
 
-            Button {
+            toggleChip("Gestures", symbol: model.gesturesEnabled ? "hand.raised" : "hand.raised.slash", isOn: model.gesturesEnabled) {
                 model.gesturesEnabled.toggle()
-            } label: {
-                Image(systemName: model.gesturesEnabled ? "hand.raised" : "hand.raised.slash")
             }
-            .accessibilityLabel("Gesture control")
-            .accessibilityValue(model.gesturesEnabled ? "On" : "Off")
 
-            Spacer()
+            if model.mode.supportsSolo {
+                toggleChip("Solo", symbol: "person.crop.square", isOn: model.isSolo) {
+                    model.isSolo.toggle()
+                }
+                .disabled(model.recordingPhase != .idle)
+            }
 
-            matchReadout
+            Spacer(minLength: Theme.Space.xs)
+
+            trailingReadout
+
+            Button {
+                isSkinPickerPresented = true
+            } label: {
+                Image(systemName: "paintpalette")
+                    .frame(width: Theme.Space.hitTarget, height: Theme.Space.hitTarget)
+                    .foregroundStyle(Theme.Palette.overlayInk)
+                    .background(Theme.Palette.scrim, in: Capsule())
+            }
+            .accessibilityLabel("Change skin")
         }
-        .font(Theme.TypeFace.body)
-        .foregroundStyle(Theme.Palette.ink)
         .buttonStyle(PressableStyle())
         .padding(Theme.Space.sm)
-        .background(Theme.Palette.scrim, in: Capsule())
-        .padding(Theme.Space.md)
     }
 
-    private var modeSwitch: some View {
-        HStack(spacing: Theme.Space.xs) {
-            modeButton(.partner, symbol: "person.2", label: "Partner mode")
-            modeButton(.selfPortrait, symbol: "person.crop.square", label: "Self-portrait mode")
+    private func toggleChip(_ title: String, symbol: String, isOn: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol)
+                .labelStyle(.titleAndIcon)
+                .font(Theme.TypeFace.label)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .foregroundStyle(isOn ? Theme.Palette.overlayAccent : Theme.Palette.overlayInk)
+                .padding(.horizontal, Theme.Space.sm)
+                .frame(minHeight: Theme.Space.hitTarget)
+                .background(Theme.Palette.scrim, in: Capsule())
         }
+        .accessibilityLabel(title)
+        .accessibilityValue(isOn ? "On" : "Off")
     }
 
-    private func modeButton(_ mode: CaptureMode, symbol: String, label: String) -> some View {
-        let isSelected = model.captureMode == mode
-        return Button {
-            model.captureMode = mode
-        } label: {
-            Image(systemName: symbol)
-                .frame(width: Theme.Space.hitTarget, height: Theme.Space.hitTarget)
-                .foregroundStyle(isSelected ? Theme.Palette.accent : Theme.Palette.neutral)
+    /// `REC 00:12` while recording; otherwise the match % for the modes that score (Pose, Selfie,
+    /// Dance); nothing for the others.
+    @ViewBuilder
+    private var trailingReadout: some View {
+        if model.recordingPhase == .recording {
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                Text(model.elapsedLabel(at: ProcessInfo.processInfo.systemUptime))
+                    .font(Theme.TypeFace.readout)
+                    .foregroundStyle(Theme.Palette.overlayAccent)
+                    .monospacedDigit()
+                    .readoutCapsule()
+            }
+        } else if model.mode.scoresMatch {
+            matchReadout
+                .readoutCapsule()
         }
-        .accessibilityLabel(label)
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     private var matchReadout: some View {
-        Group {
+        HStack(spacing: Theme.Space.xs) {
+            Text("MATCH")
+                .font(Theme.TypeFace.label)
+                .tracking(Theme.TypeFace.labelTracking)
+                .foregroundStyle(Theme.Palette.overlayMuted)
             if let match = model.match {
                 let percent = Int((match.score * 100).rounded())
                 Text("\(percent)%")
+                    .font(Theme.TypeFace.readout)
+                    .foregroundStyle(Theme.Palette.overlayAccent)
+                    .monospacedDigit()
                     .accessibilityValue("\(percent) percent match")
             } else {
                 Text("—")
+                    .font(Theme.TypeFace.readout)
+                    .foregroundStyle(Theme.Palette.overlayAccent)
                     .accessibilityValue("No pose detected")
             }
         }
-        .font(Theme.TypeFace.readout)
-        .foregroundStyle(Theme.Palette.accent)
+        .accessibilityElement(children: .combine)
         .accessibilityLabel("Pose match")
     }
 
-    private var bottomBar: some View {
+    // MARK: - Controls (panel, dial, bottom row)
+
+    private var controls: some View {
         VStack(spacing: Theme.Space.md) {
-            templateStrip
-            HStack {
-                Button {
-                    isAdjustmentsPresented = true
-                } label: {
-                    Image(systemName: "slider.horizontal.3")
-                        .frame(width: Theme.Space.hitTarget, height: Theme.Space.hitTarget)
-                }
-                .accessibilityLabel("Adjustments")
-
-                Spacer()
-                shutterButton
-                Spacer()
-
-                Color.clear.frame(width: Theme.Space.hitTarget, height: Theme.Space.hitTarget)
-            }
-            .padding(.horizontal, Theme.Space.lg)
+            ModePanelView(
+                onNewPose: { editingTemplate = model.newTemplateDraft() },
+                onEditScript: { isScriptEditorPresented = true },
+                onEditQuestions: { isQuestionsEditorPresented = true }
+            )
+            ModeDialView()
+            bottomRow
         }
+        .padding(.top, Theme.Space.md)
+        .padding(.bottom, Theme.Space.sm)
         .font(Theme.TypeFace.body)
         .foregroundStyle(Theme.Palette.ink)
         .buttonStyle(PressableStyle())
-        .padding(.bottom, Theme.Space.lg)
+    }
+
+    private var bottomRow: some View {
+        HStack {
+            sideButton("Library", symbol: "square.grid.2x2") { isLibraryPresented = true }
+                .disabled(model.recordingPhase != .idle)
+            Spacer()
+            captureButton
+            Spacer()
+            sideButton("Controls", symbol: "slider.horizontal.3") { isControlsPresented = true }
+        }
+        .padding(.horizontal, Theme.Space.lg)
+    }
+
+    private func sideButton(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: Theme.Space.xs) {
+                Image(systemName: symbol)
+                Text(title)
+                    .font(Theme.TypeFace.control)
+            }
+            .frame(minWidth: Theme.Space.shutter - Theme.Space.md, minHeight: Theme.Space.hitTarget)
+        }
+    }
+
+    @ViewBuilder
+    private var captureButton: some View {
+        switch model.shootKind {
+        case .photo: shutterButton
+        case .video: recordButton
+        }
+    }
+
+    /// Same 76pt accent ring as the shutter; the inner `ink` circle becomes a rounded square
+    /// (half size) while recording. Disabled only while the file is being saved - during the
+    /// countdown a tap cancels it.
+    private var recordButton: some View {
+        let isRecording = model.recordingPhase == .recording
+        let inner = Theme.Space.shutter - Theme.Space.md
+        return Button {
+            model.toggleRecording()
+        } label: {
+            ZStack {
+                Circle()
+                    .strokeBorder(Theme.Palette.accent, lineWidth: Theme.Stroke.shutterRing)
+                    .frame(width: Theme.Space.shutter, height: Theme.Space.shutter)
+                if isRecording {
+                    RoundedRectangle(cornerRadius: Theme.Stroke.recordCorner)
+                        .fill(Theme.Palette.ink)
+                        .frame(width: inner / 2, height: inner / 2)
+                } else {
+                    Circle()
+                        .fill(Theme.Palette.ink)
+                        .frame(width: inner, height: inner)
+                }
+            }
+        }
+        .disabled(model.recordingPhase == .saving)
+        .accessibilityLabel(isRecording ? "Stop recording" : "Start recording")
     }
 
     private var shutterButton: some View {
@@ -227,91 +360,6 @@ struct StudioView: View {
         }
         .disabled(model.isCapturing)
         .accessibilityLabel("Take photo")
-    }
-
-    private var templateStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: Theme.Space.sm) {
-                ForEach(model.templates) { template in
-                    templateChip(template)
-                }
-                Button("Edit") { editingTemplate = model.selectedTemplate }
-                    .disabled(model.selectedTemplate == nil)
-                Button {
-                    editingTemplate = newTemplate()
-                } label: {
-                    Label("New", systemImage: "plus")
-                }
-            }
-            .padding(.horizontal, Theme.Space.md)
-        }
-        .font(Theme.TypeFace.label)
-        .foregroundStyle(Theme.Palette.ink)
-        .buttonStyle(PressableStyle())
-    }
-
-    private func templateChip(_ template: PoseTemplate) -> some View {
-        let isSelected = model.selectedTemplateID == template.id
-        return Button {
-            model.select(template: template)
-        } label: {
-            Text(template.name)
-                .padding(.horizontal, Theme.Space.md)
-                .padding(.vertical, Theme.Space.sm)
-                .background(isSelected ? Theme.Palette.accent : Theme.Palette.paper3, in: Capsule())
-                .foregroundStyle(isSelected ? Theme.Palette.paper : Theme.Palette.ink)
-        }
-        .buttonStyle(PressableStyle())
-        .contextMenu {
-            if !template.isBuiltIn {
-                Button("Delete", role: .destructive) { model.deleteCustom(template) }
-            }
-        }
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
-    }
-
-    private func newTemplate() -> PoseTemplate {
-        PoseTemplate(name: "New Template", pose: model.livePose ?? PoseLibrary.builtIn.first!.pose)
-    }
-
-    // MARK: - Self-portrait mode (main screen reuses SubjectView)
-
-    private var selfPortraitLayout: some View {
-        ZStack {
-            SubjectView(isOuterDisplay: false)
-            VStack {
-                HStack {
-                    modeSwitch
-                        .padding(Theme.Space.sm)
-                        .background(Theme.Palette.scrim, in: Capsule())
-                    Spacer()
-                }
-                .padding(Theme.Space.md)
-                Spacer()
-                HStack {
-                    templatePickerButton
-                    Spacer()
-                    shutterButton
-                    Spacer()
-                    Color.clear.frame(width: Theme.Space.hitTarget, height: Theme.Space.hitTarget)
-                }
-                .padding(.horizontal, Theme.Space.lg)
-                .padding(.bottom, Theme.Space.lg)
-            }
-        }
-    }
-
-    private var templatePickerButton: some View {
-        Menu {
-            ForEach(model.templates) { template in
-                Button(template.name) { model.select(template: template) }
-            }
-        } label: {
-            Image(systemName: "figure.stand")
-                .frame(width: Theme.Space.hitTarget, height: Theme.Space.hitTarget)
-                .foregroundStyle(Theme.Palette.ink)
-        }
-        .accessibilityLabel("Choose template")
     }
 
     // MARK: - Camera denied
@@ -332,5 +380,14 @@ struct StudioView: View {
         .padding(Theme.Space.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.Palette.paper)
+    }
+}
+
+private extension View {
+    /// The top bar's readout capsule (MATCH %, REC 00:12): `scrim` behind, 44pt tall like its neighbours.
+    @MainActor func readoutCapsule() -> some View {
+        padding(.horizontal, Theme.Space.sm)
+            .frame(minHeight: Theme.Space.hitTarget)
+            .background(Theme.Palette.scrim, in: Capsule())
     }
 }

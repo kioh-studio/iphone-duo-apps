@@ -52,6 +52,10 @@ documentation carry a `// UNVERIFIED (<date>, written on Windows)` comment.
   — never inline in a view body.
 - All colours, fonts, spacing, and durations come from each app's
   `Sources/Design/Theme.swift` tokens. Never inline a raw value.
+- Theme tokens can resolve per active skin (DuoStudio: `SkinStore`; the `Palette` / `TypeFace` / `Radius`
+  lookups are `@MainActor`). Text and icons drawn over camera video or on the outer display use
+  `overlayInk` / `overlayAccent`, never `ink` / `accent` (those are dark on the light skins). Services
+  must not read the skin.
 - On-device only: no network calls, no analytics, no persistence of
   transcripts or other captured speech/text.
 - No third-party dependencies without asking anh Khôi first.

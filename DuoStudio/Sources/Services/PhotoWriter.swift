@@ -1,4 +1,5 @@
 import CoreImage
+import Foundation
 import Photos
 import PoseCore
 
@@ -51,6 +52,22 @@ enum PhotoWriter {
         try await PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
             request.addResource(with: .photo, data: outputData, options: nil)
+        }
+    }
+
+    /// Saves a finished recording to the library (same add-only authorization as photos). The file
+    /// is moved, not copied, into Photos — the temp copy disappears on success.
+    static func writeVideo(at url: URL) async throws {
+        let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        guard status == .authorized || status == .limited else {
+            throw PhotoWriterError.unauthorized
+        }
+
+        try await PHPhotoLibrary.shared().performChanges {
+            let request = PHAssetCreationRequest.forAsset()
+            let options = PHAssetResourceCreationOptions()
+            options.shouldMoveFile = true
+            request.addResource(with: .video, fileURL: url, options: options)
         }
     }
 }

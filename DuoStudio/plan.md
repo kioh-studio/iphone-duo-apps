@@ -9,10 +9,11 @@ A photographer holds the open iPhone Duo. The camera facing the subject sits on 
 the outer display mirrors the live preview back to the subject together with a pose template and
 their own live skeleton, so they can match a pose without the photographer coaching them verbally.
 The subject (who can't touch the outer display) steers filter/zoom/exposure/contrast/warmth with
-hand gestures the camera reads. No auto-shutter, no countdown — the photographer always presses the
-shutter (or, in self-portrait mode, a physical remote). On-device only: no network, no analytics;
-photos are written to the Photo library only on shutter; custom pose templates persist in
-UserDefaults as JSON.
+hand gestures the camera reads. No auto-shutter, no countdown for photos — the photographer always
+presses the shutter (or, in self-portrait mode, a physical remote). A second shoot kind, **video**,
+records clips with a guide on the subject's display (Frame / Script / Dance — see "Video mode"
+below). On-device only: no network, no analytics; photos and videos are written to the Photo
+library only when the user shoots / stops; custom pose templates persist in UserDefaults as JSON.
 
 ## Architecture
 
@@ -20,8 +21,10 @@ UserDefaults as JSON.
   `PoseLibrary` (8 built-in templates), `PoseMatcher` (bone-direction comparison + mirroring),
   `HandGesture`/`HandClassifier` (rule-based hand-shape recognition), `GestureRecognizer`
   (hand-sample stream → discrete `GestureEvent`s), `StudioState`/`Adjustments`/`StudioFilter` (the
-  live capture state machine), and the `OKLCH` colour helper used by `Theme.swift`. No
-  UIKit/SwiftUI/Vision/CoreGraphics imports, so it's unit-testable without a simulator.
+  live capture state machine), the `OKLCH` colour helper used by `Theme.swift`, and the video-mode
+  logic: `DanceRoutine` (skeleton timeline + interpolation), `DanceScorer`, `PoseAligner`,
+  `FrameGuide`. No UIKit/SwiftUI/Vision/CoreGraphics imports, so it's unit-testable without a
+  simulator.
 - `StudioModel` (app, `@MainActor @Observable`) — owns `CameraService`, a `GestureRecognizer`,
   `StudioState`, the template list (`PoseLibrary.builtIn` + custom templates loaded from
   UserDefaults), and the live `previewImage`/`livePose`/`match`. It is the single place gesture
@@ -43,6 +46,10 @@ UserDefaults as JSON.
   Vision body- and hand-pose requests (against the unfiltered upright image — see Frame drop policy
   below) and converts the results into `PoseCore` types. `FrameResult.isDetectionFrame` marks which
   frames those were, so `StudioModel.receive(_:)` knows when `pose`/`hand` are meaningful.
+- Video-mode services (details in "Video mode"): `MovieRecorder` (AVAssetWriter, fed by
+  `FrameProcessor`), `VisionPose` (shared Vision → `Pose` conversion), `RoutineStore` /
+  `RoutineImporter` (imported dance videos → skeleton timelines), `MovieComposer` (mux the reference
+  music into a dance recording).
 - `PhotoWriter` — bakes the current filter + contrast into the captured photo and writes it to the
   Photo library (exposure/warmth are already baked in by the hardware at capture time). When
   neither the filter nor the contrast actually changes anything (`filter == .none` and
@@ -63,8 +70,9 @@ subject's outer view are always showing the same match %, filter, and parameter.
 
 **Frame drop policy:** `FrameProcessor` tracks one `isDelivering` flag; if the previous
 `FrameResult` hasn't finished reaching `StudioModel.receive(_:)` on the main actor yet, the current
-frame is dropped entirely — no render, no Vision detection — rather than queued behind a busy main
-actor. `frameCount` still advances on a dropped frame, so the every-3rd-frame detection cadence
+frame is dropped entirely — no preview render, no Vision detection — rather than queued behind a
+busy main actor. (While recording, the frame has already been handed to `MovieRecorder` before this
+guard, so the recording never drops a frame because of it.) `frameCount` still advances on a dropped frame, so the every-3rd-frame detection cadence
 doesn't drift; the flag clears right after `receive(_:)` returns.
 
 **Detection-frame-only pose updates:** Vision only runs on every 3rd frame, but `previewImage`
@@ -120,10 +128,61 @@ just `selectedTemplate?.pose`, no mirroring. `PoseMatcher.mirrored(_:)` still ex
 tested) but isn't part of this path any more; mirroring for display is `SubjectView`'s job, which
 mirrors its whole preview + overlay stack together (live pose and template alike), not `PoseMatcher`'s.
 
+## Studio modes (the mode dial)
+
+`StudioModel.mode: StudioMode` (`pose | selfie | frame | script | dance | interview`, UserDefaults
+`"studioMode"`) is the **single source of truth**. `shootKind`, `videoGuide` and `captureMode` below are
+computed from it (and from `isSolo`, `"soloVideo"`, default `false`), so they can never disagree:
+
+| mode | shootKind | videoGuide | captureMode |
+|---|---|---|---|
+| pose | photo | (frame, unused) | partner |
+| selfie | photo | (frame, unused) | selfPortrait |
+| frame / script / dance | video | frame / script / dance | selfPortrait if `isSolo`, else partner |
+| interview | video | interview | partner (Solo ignored) |
+
+Solo is a deliberate deviation from the design canvas: dance and script are often shot alone on a
+stand, so the video modes that support it get a "Solo" toggle instead of losing self-portrait video.
+
+`mode` / `isSolo` changes are ignored (reverted in `didSet`) while `recordingPhase != .idle`; the dial is
+also disabled. A change calls `applyDerivedChange(from:)`: if the derived video config (kind, guide)
+changed -> `configureVideo()`; if the derived capture mode changed -> `isOuterEnabled = (partner)` and
+`captureSource.setMode`. Interview is entered after the camera switch and left before it (the session
+swap needs the partner camera pair).
+
+**Migration**: if `"studioMode"` is absent (first launch after the redesign), `migratedMode` derives it
+once from the old `"captureMode"` / `"shootKind"` / `"videoGuide"` keys (selfPortrait + photo -> selfie,
+photo -> pose, video -> its guide; Solo = old captureMode was selfPortrait for a video guide; an old
+selfPortrait + interview pairing becomes Frame + Solo) and writes `"studioMode"` / `"soloVideo"`. The
+old keys are never written again. In `init` the migration works on locals, not `self.mode`: an
+`@Observable` property must not be read before every stored property is initialised.
+
+`lastSaved: SavedClip?` is set after a successful photo or video save (the "Saved to Photos" sheet binds
+to it; dance snapshots `scorer.average` as `routineScore`, because `lastRoutineScore` clears itself
+after `Motion.scoreHold` and is still what the outer display shows).
+
+### Skins
+
+`SkinStore.shared` (`@MainActor @Observable`, UserDefaults `"skin"`, default `.studio`) holds the active
+`Skin`. `Theme.Palette` / `TypeFace` / `Radius` are `@MainActor static var` lookups into it, so every
+existing call site keeps compiling and views re-render on a skin change (Observation tracks the read
+inside `body`). Services never read it: `FrameProcessor`'s interviewer-half fill stays the Studio
+`paper` constant, so recorded files do not depend on the skin. `Canvas` renderer closures
+(`SkeletonOverlay`, `FrameGuideOverlay`, `PoseThumbnailView`) capture their colours by value from `body`
+and use `nonisolated static` drawing helpers, so they never touch a `@MainActor` token from a
+possibly-nonisolated closure. The colour scheme follows the skin (`.light` for Vintage / Modern) via
+`RootView`; the outer display (`SubjectView(isOuterDisplay: true)`) forces `.dark`.
+
+### Onboarding
+
+`RootView` shows `OnboardingView` until UserDefaults `"hasOnboarded"` (`@AppStorage`) is true; only the
+camera branch runs `model.requestCameraAccess()`, so the permission prompt comes after onboarding.
+
 ## Capture modes
 
-`StudioModel` owns `CaptureMode: String, CaseIterable { case partner, selfPortrait }`, persisted in
-UserDefaults key `"captureMode"`, default `.partner`.
+`StudioModel` exposes `CaptureMode: String, CaseIterable { case partner, selfPortrait }` as a value
+**derived from the mode dial** (see "Studio modes" above; the old `"captureMode"` key is only read once,
+for migration).
 
 - **`.partner`** (the primary spec): photographer on the inner display, camera faces the subject,
   the subject sees `SubjectView` on the Duo's outer display via `CameraCaptureAccessory`.
@@ -132,8 +191,8 @@ UserDefaults key `"captureMode"`, default `.partner`.
   `DUO_DIRECTION_COORDINATOR` enabled on iOS 27.1+, the direction coordinator's forward-facing
   device (the one facing the same view the user is looking at) is used; otherwise
   `.builtInWideAngleCamera` at position `.front`. The main (and only) screen shows the `SubjectView`
-  composition directly, with a thin control layer added on top (shutter, mode switch, template
-  picker). `isOuterEnabled` is forced `false` in this mode — nothing is driving the outer display,
+  composition as the preview of the one shared camera layout (the same mode panel, dial and bottom
+  row as every other mode sit below it). `isOuterEnabled` is forced `false` in this mode — nothing is driving the outer display,
   so it stays off rather than showing a stale frame. Switching back to `.partner` restores
   `isOuterEnabled = true`.
 - **Remote shutter** (both modes, but the only shutter path in self-portrait mode): SwiftUI's
@@ -170,16 +229,187 @@ flag, nested inside `if #available(iOS 27.1, *)`. The flag is now **on by defaul
 Apple's published docs — see Verification status below. What's left is verifying the coordinator's
 real behavior on hardware/simulator, tracked in `backlog.md`.
 
+## Video mode
+
+`StudioModel.shootKind` (`ShootKind: photo | video`) sits next to `captureMode`: capture mode says
+*which camera and whose screen*, shoot kind says *what the shutter makes*. In video kind `videoGuide`
+(`VideoGuide: frame | script | dance | interview`) picks what the subject's display shows. Both - like
+`captureMode` - are **derived from `StudioModel.mode`** (see "Studio modes"); the old `"shootKind"` /
+`"videoGuide"` keys only feed the one-time migration. Mode changes are ignored (reverted in `didSet`)
+while `recordingPhase != .idle`; the dial is also disabled.
+
+### Recording pipeline
+
+`RecordingPhase: idle | countdown(Int) | recording | saving`.
+
+- `toggleRecording()` (record button, remote shutter via `remoteShutter()`): idle → countdown, recording
+  → stop, countdown → cancel, saving → ignored. Video has a 3-2-1 countdown (1 s per number,
+  `Theme.Motion.countdownStep`) because the person starting it is usually also the subject; photos
+  still have none.
+- After the countdown: `captureSource.startRecording(includeAudio:)`, then `recordingStartUptime` /
+  `.recording`. Stop: `captureSource.stopRecording()` → (dance) `MovieComposer` → `PhotoWriter
+  .writeVideo(at:)` → temp files removed → `.idle`. Any failure: `errorMessage = "Couldn't save the
+  video."`, phase back to `.idle`. Backgrounding (`scenePhase == .background`) and `StudioModel.stop()`
+  call `stopRecordingIfNeeded()`.
+- `FrameProcessor.process(upright:time:)` hands the **full-resolution, filtered, contrast-adjusted**
+  `CIImage` to `MovieRecorder.appendVideo` right after the filter step and **before** the
+  `isDelivering` drop guard, so the main actor's frame-drop policy never costs a recorded frame. A
+  recording therefore bakes in the current filter + contrast exactly like `PhotoWriter` does for
+  photos; exposure/warmth are already in the sensor data.
+- `MovieRecorder` (`@unchecked Sendable`, everything queue-confined): `start` only arms it; the
+  `AVAssetWriter` is created on the first frame (H.264 `.mp4`, even width/height from that frame,
+  32BGRA pixel-buffer adaptor, real-time input, session started at the first frame's time). Optional
+  AAC mono audio input. `finish()` throws `MovieRecorderError.noFrames` if no frame ever arrived.
+- Audio: `FrameProcessor` also conforms to `AVCaptureAudioDataOutputSampleBufferDelegate`; the one
+  `captureOutput` dispatches on `output is AVCaptureAudioDataOutput`. `CameraService` points the
+  audio output at the same `videoQueue` as the video output, so the recorder sees both in capture
+  order (and only buffers stamped at/after the session start are written).
+- Capture preset: `CameraService.setVideoConfiguration(isVideo:recordsAudio:)` switches the session
+  between `.photo` and `.hd1920x1080` (fallback `.high`) and adds/removes the microphone input +
+  audio output. The connection rotation (90°) is unchanged, so recorded frames are portrait
+  1080×1920 and need no transform. `StudioModel.configureVideo()` computes `recordsAudio = video kind
+  && guide != .dance && microphone authorized`, requesting microphone permission the first time a
+  mic-using guide is entered; if it is denied the video is simply silent. Dance never records the
+  microphone — see below.
+- Simulator: video mode records the looping sample clip through the same path (no audio —
+  `includeAudio` is ignored); the stick-figure fallback throws `CameraServiceError
+  .recordingUnsupported` and the alert reads "Recording isn't supported in this simulator mode."
+
+### Frame guide
+
+`PoseCore.FrameGuide.hint(for:)` turns the live pose's bounding box into a `FrameHint`, set as
+`StudioModel.frameHint` on detection frames in video + Frame guide. The safe box in the un-mirrored
+image is x 0.08…0.82, y 0.08…0.82 (clear of TikTok's right-hand buttons and bottom caption). Priority:
+no person (nil or < 6 joints) → step back (taller than the safe band, crossing the top and/or bottom
+edge, or spanning past both sides) → come closer (box height < 0.35) → move left/right → in frame.
+Left/right is from the **subject's** point of view: they face the camera, so their left is +x in the
+un-mirrored image; a body leaving the image's left edge (`minX < 0.08`) is fixed by stepping toward
++x, i.e. their own left → "Move left" (same reasoning as `GestureRecognizer`'s swipe).
+
+### Script (teleprompter)
+
+`scriptText` (key `"teleprompterScript"`) and `scriptSpeed` (points/second, key `"teleprompterSpeed"`,
+default 40, clamped 10…120) live in the model. The subject's display scrolls the text up by
+`recordingElapsed × scriptSpeed` (`scriptOffset(at:)`), read from a `TimelineView` — no timer in the
+model; idle shows the start of the script. The script is user-typed text kept in UserDefaults, like
+custom templates.
+
+### Dance
+
+- **Import**: `PhotosPicker(matching: .videos)` → `PickedMovie` (a `Transferable` that copies the
+  picked file into a temp file we own) → `StudioModel.importRoutine(from:)` → `RoutineImporter`.
+  Videos over 90 s are rejected (`RoutineImportError.tooLong`; `ponytail:` ceiling — Vision per
+  sample time and `routines.json` size). The file is copied into `RoutineStore`
+  (`Application Support/Routines/<uuid>.<ext>`); an `AVAssetReader` decodes 32BGRA frames, each
+  oriented upright from the track's `preferredTransform` (EXIF-orientation mapping, then re-origined
+  to (0,0)), and every 0.1 s (10 fps) `VisionPose.detectBody(in:)` produces a `TimedPose`
+  (`pose == nil` when nobody is found). Progress = timestamp / duration, shown as "Importing 42%".
+  Runs off the main actor (`@concurrent`, one cooperative thread for the duration) and honours
+  cancellation. A video with no audio track imports fine; the recording is then just silent.
+- **Routine** (`PoseCore.DanceRoutine`): `pose(at:)` interpolates linearly per joint between the
+  surrounding frames (binary search); a nil frame breaks interpolation — the nearest real pose within
+  0.25 s is used, else nil. `isMirrored` (set from the chip's "Flip left/right") flips joints on read
+  for tutorials filmed mirrored.
+- **The music is the clock**: while recording, `AVPlayer(url:)` plays the reference video;
+  `player.currentTime()` is the routine time `t` used for both the ghost and scoring, so picture,
+  music and ghost can't drift apart from each other. Recorder start and `player.play()` are a few ms
+  apart (`ponytail:` comment — add an offset knob if device testing shows drift).
+  `AVAudioSession` is set to `.playback` first. The recording ends automatically at `routine.duration`.
+- **Ghost**: `danceGhost` is updated on **every** frame in `receive(_:)` (not just detection frames)
+  so it moves smoothly: while recording `routine.pose(at: t)` run through `PoseAligner.align` onto
+  `livePose` (root on root, torso length matched — drawing only; matching is already translation/scale
+  invariant); while idle (and during the countdown) the routine's opening pose as a preview.
+  `displayTemplate` returns it, so `SkeletonOverlay` draws it as the dashed ghost.
+- **Scoring** (`PoseCore.DanceScorer`): on detection frames while recording, the live pose is
+  compared with every routine pose in `[t − 0.35 s, t]` (dancers react after the beat) and the best
+  `PoseMatcher.match` counts; the live match % shown is that best match. The mean (`average`) × 100,
+  rounded, is `lastRoutineScore`, shown on the subject's display for `Theme.Motion.scoreHold` (4 s).
+  Frames with no comparable pose are not counted.
+- **Audio mux**: no microphone is recorded in dance mode (the music plays out loud; recording it
+  would add room echo and double the track). `MovieComposer.replacingAudio` builds an
+  `AVMutableComposition` of the recording's video + the reference video's first audio track
+  (`min(video, media)` long) and exports it with the passthrough preset to a new temp `.mp4`; with no
+  audio track in the reference it returns the recording unchanged.
+
+### Interview
+
+Partner mode only. One open Duo records **both cameras** into a single 1080x1920 split-screen clip:
+guest (the camera partner mode already uses) on the top half, interviewer (the camera self-portrait
+uses; on the Duo, the inner under-display camera) on the bottom half. The guest sees themselves on
+the outer display; the interviewer sees the recorded composite and question cards on the inner one.
+`VideoGuide.interview` is hidden (`availableGuides`) in self-portrait mode, and switching to
+self-portrait while on it resets the guide to `.frame` (also reconciled in `init`).
+
+- **Session swap** (`CameraService`): `setVideoConfiguration(isVideo:recordsAudio:interview:)` rebuilds
+  `session` (now a `var`, sessionQueue-confined) as an `AVCaptureMultiCamSession` when entering the
+  guide and as a plain `AVCaptureSession` when leaving. `tearDown` stops the old one and detaches
+  every input/output so the shared outputs can join the next. Any change while a dual session is up
+  (e.g. the microphone arriving) rebuilds it. Never switched mid-recording - the model's `didSet`
+  guards revert guide/kind changes while `recordingPhase != .idle`.
+- **Manual wiring**: `addInputWithNoConnections` / `addOutputWithNoConnections` +
+  `AVCaptureConnection(inputPorts:output:)`: guest input -> `videoOutput` (delegate
+  `FrameProcessor`, as always), interviewer input -> `secondaryOutput` (delegate `SecondaryFrameSink`,
+  same `videoQueue`), mic -> `audioOutput`. No photo output (`capturePhoto` throws if asked).
+  Rotation 90 / un-mirrored on both video connections (`configureConnections()`). Exposure/WB
+  `apply(_:)` still targets the guest device only. A multi-cam session has no preset, so
+  `selectMultiCamFormat` picks the largest `isMultiCamSupported` format up to 1080p at 30 fps.
+- **Availability / fallback**: dual needs `AVCaptureMultiCamSession.isMultiCamSupported`, two
+  distinct cameras that appear together in `supportedMultiCamDeviceSets`, wirable connections, and
+  `hardwareCost` / `systemPressureCost` <= 1.0 after commit; otherwise the normal single-session
+  path records the guest camera full-frame (**guest-only fallback**), also when `startRunning()`
+  leaves the dual session not running (`dualDisabled` for the rest of the run). The outcome is
+  reported through `CaptureSource.setDualCaptureHandler` to `StudioModel.interviewDualAvailable`
+  (assumed true until reported), and the inner card shows "This iPhone can't record both cameras
+  — recording the guest only." when false. `ponytail:` lowering `activeFormat` would keep dual
+  working on more devices.
+- **Frames**: `SecondaryFrameSink` keeps only the latest interviewer frame (lock-guarded upright
+  `CIImage`). `FrameProcessor` holds an optional sink in `cameraState`; when set, `process` builds
+  the recorded frame as the composite: each camera's frame gets the current filter + contrast
+  (per-pixel, so equal to filtering the composite - and the guest frame is filtered only once, shared
+  with the outer preview), then is aspect-filled and centre-cropped into its 1080x960 half
+  (geometry: `PoseCore.SplitLayout.aspectFill`, tested; Core Image y-up, so the guest half is the
+  larger y). Until the interviewer's first frame arrives, the bottom half is `paper` colour.
+  The composite goes to `recorder.appendVideo` (before the drop guard, like every recording).
+- **Preview split**: Vision still runs on the guest frame only; `FrameResult.image` stays the
+  guest-only frame (outer display). `FrameResult.compositePreview` is the composite downscaled to a
+  960 px long edge, non-nil only in interview; the inner preview shows it (falling back to `image`
+  in guest-only mode) with no skeleton overlay.
+- **Model**: `interviewQuestionsText` (UserDefaults `"interviewQuestions"`, stored as typed so a
+  trailing newline survives editing), `interviewQuestions` = trimmed non-empty lines,
+  `currentQuestionIndex` (not persisted, reset to 0 in `startRecording()`), `nextQuestion()` /
+  `previousQuestion()` clamp. Recording uses the normal countdown/start/stop/save pipeline with
+  `includeAudio = micAuthorized` (the mic permission is requested on entering any non-Dance guide).
+- **Simulator**: no second camera. In video mode `SimulatedFrameSource` feeds the same clip frame to
+  the sink as the "interviewer", flipped horizontally so the halves differ, and reports dual
+  available; the split layout and recording are testable. The stick-figure fallback reports
+  guest-only (it can't record anyway).
+
+### Gestures while recording
+
+`receive(_:)` does not feed `GestureRecognizer` while `recordingPhase != .idle` (countdown, recording
+and saving), and `startRecording()` replaces the recognizer so no half-finished hold fires when
+control returns. The subject's gesture HUD/legend are hidden during countdown/recording.
+
 ## Privacy
 
 Everything on-device: Vision pose/hand detection, Core Image filtering, and PHPhotoLibrary writes
-never leave the phone. No network calls, no analytics. Custom pose templates are the only thing
-persisted (UserDefaults, JSON) — no transcript or captured-frame history is kept once the app is
+never leave the phone. No network calls, no analytics. Persisted: custom pose templates, the
+studio mode (`"studioMode"`), Solo (`"soloVideo"`), skin (`"skin"`), the onboarding flag (`"hasOnboarded"`),
+teleprompter script and speed / interview questions (UserDefaults; the old `"captureMode"` / `"shootKind"` /
+`"videoGuide"` keys are read once to migrate and no longer written), and — new
+with video mode — **imported dance reference videos plus `routines.json` (their skeleton timelines)
+in `Application Support/Routines/`, which stay until the user deletes the routine**. Recordings are
+saved only to Photos (add-only authorization, file moved in); every temp file (the recording, the
+muxed copy, the picker's copy of an imported video) is deleted afterwards. The microphone is used
+only for Frame/Script/Interview recordings and its audio only goes into the video file.
+`NSPhotoLibraryUsageDescription` is deliberately **not** added: `PhotosPicker` runs out of process
+and needs no library read permission. No captured-frame or live-audio history is kept once the app is
 backgrounded or terminated.
 
 `Resources/PrivacyInfo.xcprivacy` declares this: no tracking, no tracking domains, no collected data
 types, and one accessed-API-type entry for `NSPrivacyAccessedAPICategoryUserDefaults` (reason
-`CA92.1`, for the custom-template/capture-mode persistence above). Not excluded from the `Resources`
+`CA92.1`, for the persistence above). `RoutineStore` never reads file timestamps, so no
+file-timestamp entry is needed. Not excluded from the `Resources`
 group in `project.yml`, so XcodeGen picks it up as a plain resource alongside `Info.plist`/
 `Assets.xcassets`.
 
@@ -199,7 +429,24 @@ no Mac/Xcode/Swift toolchain was available to compile or run any of this.
 | `AVCaptureDevice.RotationCoordinator(device:previewLayer:)`, `videoRotationAngleForHorizonLevelCapture`, `AVCaptureConnection.videoRotationAngle`/`isVideoMirrored` | Upright, un-mirrored live preview + horizon-correct photo capture | Unverified — documented iOS 17+ API, but exact behavior on Duo hardware not checked from Windows | Not checked from Windows |
 | Camera-only dual-display behavior; outer display takes no touch | Confirms the non-interactive `SubjectView` design and that only `CameraCaptureAccessory` (not a general window) targets the outer display | Unverified — third-party notes, not Apple docs | Group Labs Q&A — https://gist.github.com/frankschlegel/6356a059426b2393528691822edfdae6 |
 | `.onCameraCaptureEvent` (AVKit, iOS 18+) | Remote shutter (volume buttons / Camera Control / Bluetooth remote) in both capture modes | Unverified — signature/availability not checked against real docs from Windows | Not checked from Windows |
-| `VNDetectHumanBodyPoseRequest` / `VNDetectHumanHandPoseRequest` joint names and confidence semantics | Converting Vision output into `PoseCore.Pose` / hand joints | Unverified | Not checked from Windows |
+| `VNDetectHumanBodyPoseRequest` / `VNDetectHumanHandPoseRequest` joint names and confidence semantics | Converting Vision output into `PoseCore.Pose` / hand joints (body conversion now shared in `VisionPose`) | Unverified | Not checked from Windows |
+| `AVAssetWriter` + `AVAssetWriterInputPixelBufferAdaptor` (`pixelBufferPool` non-nil after `startWriting()`), real-time H.264 + AAC inputs, `startSession(atSourceTime:)` | `MovieRecorder` | Unverified (UNVERIFIED markers in `MovieRecorder.swift`) | Not checked from Windows |
+| `AVCaptureAudioDataOutput` sharing `videoQueue` and one delegate object with the video output; mic input add/remove on a live session; `.hd1920x1080` preset switch | Audio + video arriving in capture order; photo ↔ video preset switch | Unverified (`CameraService.updateAudio`) | Not checked from Windows |
+| `AVAudioSession` `.playback` while an `AVCaptureSession` (video only) runs | Dance music playback during recording | Unverified (`StudioModel.startPlayer`) | Not checked from Windows |
+| `AVAssetExportSession(asset:presetName:)` + async `export(to:as:)`, Passthrough + `.mp4` | `MovieComposer` audio mux | Unverified (`MovieComposer.swift`) | Not checked from Windows |
+| `PhotosPicker(matching: .videos)` + `Transferable` `FileRepresentation(contentType: .movie)` closure shapes; `PhotosPicker` inside a `Menu` | Dance import | Unverified (`PickedMovie.swift`, `StudioView.videoMenuButton`) | Not checked from Windows |
+| Orienting imported video frames from `preferredTransform` via `CIImage.oriented(_:)` before Vision | `RoutineImporter` | Unverified (`RoutineImporter.swift`) | Not checked from Windows |
+| `@concurrent` on `RoutineImporter.importRoutine` (Swift 6.2) | Keep the Vision loop off the main actor | Unverified | Not checked from Windows |
+| `PHAssetResourceCreationOptions.shouldMoveFile` + `.video` resource | `PhotoWriter.writeVideo` | Unverified | Not checked from Windows |
+| `AVCaptureMultiCamSession` pair availability (`supportedMultiCamDeviceSets`) for the Duo's outer (guest) + inner under-display (interviewer) cameras, and which `deviceTypes` the inner camera is discoverable under | Interview dual capture | Unverified (`CameraService.isSupportedPair`) | Not checked from Windows |
+| `CameraCaptureAccessory` (outer display) while the app's session is an `AVCaptureMultiCamSession` | Interview guest display | Unverified | Not checked from Windows |
+| `AVCaptureMultiCamSession.hardwareCost` / `systemPressureCost` after commit, and `isMultiCamSupported` formats up to 1080p at 30 fps | Dual-mode fallback decision | Unverified (`CameraService.makeDualSession`, `selectMultiCamFormat`) | Not checked from Windows |
+| The inner under-display camera's resolution cap (assumed 1080p max) | Bottom half quality | Unverified | Not checked from Windows |
+| Manual `AVCaptureConnection(inputPorts:output:)` rotation/mirroring on a multi-cam session; `CIColor(red:green:blue:alpha:colorSpace:)` linear paper fill | Interview composite | Unverified (`CameraService.configureConnections`, `FrameProcessor.paper`) | Not checked from Windows |
+| Observation tracking through `@MainActor static var` token getters read inside `body` (`Theme.Palette` / `TypeFace` / `Radius` -> `SkinStore.shared.skin`), including `.sheet` content and the outer-display `CameraCaptureAccessory` scene | Live skin switching re-renders both screens | Unverified (marker in `Theme.swift`); fallback is `.id(skin)` on the root views | Not checked from Windows |
+| `Font.system(_:design:)` + `.weight(_:)` with `.serif` / `.rounded` / `.monospaced` per skin; `preferredColorScheme` following the skin for sheets and `nil` from the inner `SubjectView` | Skin typography and light skins | Unverified | Not checked from Windows |
+| `Canvas` renderer closure isolation (colours captured by value, drawing helpers `nonisolated static`) | `SkeletonOverlay`, `FrameGuideOverlay`, `PoseThumbnailView` | Unverified - written to compile whether or not the closure is `@MainActor` | Not checked from Windows |
+| `@AppStorage("hasOnboarded")` in `RootView`; `.sheet(item:)` bound to `StudioModel.lastSaved` | Onboarding gate, "Saved to Photos" sheet | Unverified | Not checked from Windows |
 
 ## Simulator
 
@@ -256,8 +503,14 @@ runs in video mode instead; the stick figure above is the fallback when the file
 - `lastImage` (what `capturePhoto()` encodes) is the unfiltered frame, matching device, where
   `PhotoWriter` bakes filter + contrast in afterwards.
 - Self-portrait mode mirrors the frame horizontally before Vision, as the stick figure does.
+- Video shoot kind records this clip through `FrameProcessor` → `MovieRecorder` (filter + contrast
+  baked in) with no audio; the stick-figure fallback can't record and shows an alert instead.
 - `project.yml` sets `EXCLUDED_SOURCE_FILE_NAMES[sdk=iphoneos*]: SimulatorSample.mp4` so the clip
-  never ships to devices; the file is git-ignored (`DuoStudio/Resources/SimulatorSample.mp4`).
+  never ships to devices. A Pexels sample clip is committed ("A Young Woman Dancing While Looking at
+  the Camera", https://www.pexels.com/video/a-young-woman-dancing-while-looking-at-the-camera-6868329/,
+  Pexels License); device builds still exclude it via `EXCLUDED_SOURCE_FILE_NAMES`.
+- Interview guide: the same clip frame also feeds `SecondaryFrameSink` as the "interviewer" (flipped
+  horizontally) so the split-screen layout and its recording can be exercised - see "Interview".
 - Ceiling: the clip must already be upright portrait — `preferredTransform` is not applied.
 
 ## Out of scope

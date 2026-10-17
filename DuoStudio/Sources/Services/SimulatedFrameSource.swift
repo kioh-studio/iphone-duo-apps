@@ -36,6 +36,9 @@ final class SimulatedFrameSource: CaptureSource, @unchecked Sendable {
     /// Video mode only (non-nil iff `SimulatorSample.mp4` is in the bundle): the real Vision
     /// pipeline, driven from `timerQueue` — the single serial queue it requires.
     private let videoProcessor: FrameProcessor?
+    /// Interview guide: stands in for the second camera - `tickVideo()` feeds it the same clip
+    /// frame, flipped horizontally so the two halves of the split screen look different.
+    private let interviewerSink = SecondaryFrameSink()
 
     init() {
         videoProcessor = Self.sampleVideoURL == nil ? nil : FrameProcessor()
@@ -54,6 +57,9 @@ final class SimulatedFrameSource: CaptureSource, @unchecked Sendable {
         /// The last frame's filtered image, kept only so `capturePhoto()` can re-encode it as JPEG
         /// without redrawing.
         var lastImage: CIImage?
+        /// Interview guide in video mode: `tickVideo()` also feeds `interviewerSink`.
+        var interview = false
+        var dualHandler: (@Sendable (Bool) -> Void)?
     }
     private let state = OSAllocatedUnfairLock(initialState: State())
 
@@ -131,6 +137,42 @@ final class SimulatedFrameSource: CaptureSource, @unchecked Sendable {
         return data
     }
 
+    // MARK: - Recording
+
+    /// Nothing to switch in the Simulator (no capture session, preset or microphone) except the
+    /// Interview guide: video mode fakes the second camera (see `interviewerSink`); the
+    /// stick-figure fallback has no recordable frames, so it reports the guest-only fallback.
+    func setVideoConfiguration(isVideo: Bool, recordsAudio: Bool, interview: Bool) {
+        let active = isVideo && interview
+        let dual = active && videoProcessor != nil
+        state.withLock { $0.interview = dual }
+        videoProcessor?.setInterviewSink(dual ? interviewerSink : nil)
+        if !dual { interviewerSink.clear() }
+        if active {
+            let handler = state.withLock { $0.dualHandler }
+            handler?(dual)
+        }
+    }
+
+    func setDualCaptureHandler(_ handler: @escaping @Sendable (Bool) -> Void) {
+        state.withLock { $0.dualHandler = handler }
+    }
+
+    /// Video mode records through the same `FrameProcessor` → `MovieRecorder` path as the device
+    /// (filter + contrast baked in), but with no audio — the Simulator has no microphone, so
+    /// `includeAudio` is ignored. The stick-figure fallback never goes through `FrameProcessor`, so
+    /// there is nothing to record.
+    func startRecording(includeAudio: Bool) async throws {
+        guard let videoProcessor else { throw CameraServiceError.recordingUnsupported }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).mp4")
+        videoProcessor.recorder.start(url: url, includeAudio: false)
+    }
+
+    func stopRecording() async throws -> URL {
+        guard let videoProcessor else { throw CameraServiceError.recordingUnsupported }
+        return try await videoProcessor.recorder.finish()
+    }
+
     // MARK: - Video mode (timerQueue)
 
     private func tickVideo() {
@@ -154,6 +196,13 @@ final class SimulatedFrameSource: CaptureSource, @unchecked Sendable {
         // Unfiltered, matching device: `CameraService.capturePhoto()` returns an unfiltered capture
         // and `PhotoWriter` bakes filter + contrast in afterwards.
         state.withLock { [upright] in $0.lastImage = upright }
+
+        if state.withLock({ $0.interview }) {
+            let extent = upright.extent
+            interviewerSink.set(upright.transformed(
+                by: CGAffineTransform(scaleX: -1, y: 1).translatedBy(x: -extent.width, y: 0)
+            ))
+        }
 
         // Monotonic elapsed time, not the video PTS: PTS resets on every loop and
         // `GestureRecognizer` needs time that never runs backwards.
@@ -203,7 +252,7 @@ final class SimulatedFrameSource: CaptureSource, @unchecked Sendable {
         guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
         state.withLock { [ciImage] in $0.lastImage = ciImage }
 
-        let result = FrameResult(image: cgImage, pose: pose, hand: hand, isDetectionFrame: true)
+        let result = FrameResult(image: cgImage, pose: pose, hand: hand, isDetectionFrame: true, compositePreview: nil)
         // Snapshot the weak reference to a local `let` first, same reasoning as `FrameProcessor`:
         // Swift 6's `sending` closure on `Task.init` needs a single, disconnected reference to hand
         // `model` (non-`Sendable`, `@MainActor`-isolated) over to the main actor without a race.
