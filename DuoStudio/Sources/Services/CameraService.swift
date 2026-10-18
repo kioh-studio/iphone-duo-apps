@@ -316,8 +316,8 @@ final class CameraService: NSObject, CaptureSource, @unchecked Sendable {
             audioOutput.setSampleBufferDelegate(frameProcessor, queue: videoQueue)
             if let port = micInput.ports.first(where: { $0.mediaType == .audio }) {
                 let connection = AVCaptureConnection(inputPorts: [port], output: audioOutput)
-                if multi.canAdd(connection) {
-                    multi.add(connection)
+                if multi.canAddConnection(connection) {
+                    multi.addConnection(connection)
                     audio = micInput
                 }
             }
@@ -385,8 +385,8 @@ final class CameraService: NSObject, CaptureSource, @unchecked Sendable {
             for: .video, sourceDeviceType: device.deviceType, sourceDevicePosition: device.position
         ).first else { return false }
         let connection = AVCaptureConnection(inputPorts: [port], output: output)
-        guard session.canAdd(connection) else { return false }
-        session.add(connection)
+        guard session.canAddConnection(connection) else { return false }
+        session.addConnection(connection)
         return true
     }
 
