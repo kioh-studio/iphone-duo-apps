@@ -94,14 +94,21 @@ jobs:
         run: |
           xcrun simctl list devicetypes
           xcrun simctl list runtimes
-          DEV=$(xcrun simctl list devicetypes | grep -i "Duo" | tail -1 || true)
-          [ -n "$DEV" ] || DEV=$(xcrun simctl list devicetypes | grep "iPhone" | tail -1)
-          DEVID=$(echo "$DEV" | sed -E 's/.*\((com\.apple[^)]*)\).*/\1/')
           RT=$(xcrun simctl list runtimes | grep "^iOS" | grep -vi unavailable | tail -1)
-          RTID=$(echo "$RT" | sed -E 's/.* - (com\.apple\.CoreSimulator\.SimRuntime\.[^ ]*)$/\1/')
-          echo "Device type: $DEV -> $DEVID"
+          RTID=$(echo "$RT" | sed -E 's/.* - (com\.apple\.CoreSimulator\.SimRuntime\.[^ ]*)$//')
           echo "Runtime: $RT -> $RTID"
-          UDID=$(xcrun simctl create smoke "$DEVID" "$RTID")
+          # Candidates: Duo first, then iPhones newest-first. The Duo type may be incompatible with
+          # the installed runtime ("Incompatible device"), so take the first that creates.
+          UDID=""
+          for DEV in $( (xcrun simctl list devicetypes | grep -i "Duo"; xcrun simctl list devicetypes | grep "^iPhone" | grep -vi Duo | tac) | sed -E 's/.*\((com\.apple[^)]*)\).*//'); do
+            if UDID=$(xcrun simctl create smoke "$DEV" "$RTID"); then
+              echo "Device type used: $DEV"
+              break
+            fi
+            UDID=""
+            echo "Cannot create $DEV on $RTID, trying next"
+          done
+          [ -n "$UDID" ] || { echo "no usable device type"; exit 1; }
           echo "UDID=$UDID" >> "$GITHUB_ENV"
           xcrun simctl boot "$UDID"
           xcrun simctl bootstatus "$UDID" -b
