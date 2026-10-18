@@ -187,10 +187,10 @@ for migration).
 - **`.partner`** (the primary spec): photographer on the inner display, camera faces the subject,
   the subject sees `SubjectView` on the Duo's outer display via `CameraCaptureAccessory`.
 - **`.selfPortrait`** (works on every iPhone, not just the Duo): phone on a tripod facing the user.
-  `CameraService.setMode(_:)` reconfigures the input on `sessionQueue`: with
-  `DUO_DIRECTION_COORDINATOR` enabled (currently off, see verification table), the direction coordinator's forward-facing
-  device (the one facing the same view the user is looking at) is used; otherwise
-  `.builtInWideAngleCamera` at position `.front`. The main (and only) screen shows the `SubjectView`
+  `CameraService.setMode(_:)` reconfigures the input on `sessionQueue`:
+  `.builtInWideAngleCamera` at position `.front` is what currently runs. The direction coordinator's
+  forward-facing device (the one facing the same view the user is looking at) is written but compiled
+  out under `DUO_DIRECTION_COORDINATOR` until the SDK ships the class (see verification table). The main (and only) screen shows the `SubjectView`
   composition as the preview of the one shared camera layout (the same mode panel, dial and bottom
   row as every other mode sit below it). `isOuterEnabled` is forced `false` in this mode — nothing is driving the outer display,
   so it stays off rather than showing a stale frame. Switching back to `.partner` restores
@@ -226,10 +226,11 @@ ID for the mode (`.partner` → backward, `.selfPortrait` → forward) via `AVCa
 no IDs yet.
 
 The whole coordinator implementation is compiled only under the `DUO_DIRECTION_COORDINATOR` Swift
-flag, nested inside `if #available(iOS 27.1, *)`. The flag is now **on by default**
-(`SWIFT_ACTIVE_COMPILATION_CONDITIONS` in `project.yml`) now that its shape is confirmed against
-Apple's published docs — see Verification status below. What's left is verifying the coordinator's
-real behavior on hardware/simulator, tracked in `backlog.md`.
+flag, nested inside `if #available(iOS 27.1, *)`. The flag is **off by default**
+(`SWIFT_ACTIVE_COMPILATION_CONDITIONS` in `project.yml`): the coordinator path is written but compiled
+out until the SDK ships the class, and the wide back/front fallback is what currently runs — see
+Verification status below. Once re-enabled, the coordinator's real behavior on hardware/simulator
+still needs verifying, tracked in `backlog.md`.
 
 ## Video mode
 
