@@ -68,3 +68,100 @@ jobs:
         with:
           name: build-log-${{ matrix.runner }}
           path: build.log
+
+  # Runtime smoke test: launch in a simulator and screenshot each skin/mode. Same paths filter as
+  # the build job (private repo, macOS minutes are expensive) since it lives in the same workflow.
+  smoke:
+    name: Simulator smoke run
+    needs: build
+    runs-on: xcode-27
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+
+      - name: Install XcodeGen and generate project
+        run: |
+          brew install xcodegen
+          cd DuoStudio && xcodegen generate
+
+      - name: Create and boot simulator
+        run: |
+          xcrun simctl list devicetypes
+          xcrun simctl list runtimes
+          DEV=$(xcrun simctl list devicetypes | grep -i "Duo" | tail -1 || true)
+          [ -n "$DEV" ] || DEV=$(xcrun simctl list devicetypes | grep "iPhone" | tail -1)
+          DEVID=$(echo "$DEV" | sed -E 's/.*\((com\.apple[^)]*)\).*/\1/')
+          RT=$(xcrun simctl list runtimes | grep "^iOS" | grep -vi unavailable | tail -1)
+          RTID=$(echo "$RT" | sed -E 's/.* - (com\.apple\.CoreSimulator\.SimRuntime\.[^ ]*)$/\1/')
+          echo "Device type: $DEV -> $DEVID"
+          echo "Runtime: $RT -> $RTID"
+          UDID=$(xcrun simctl create smoke "$DEVID" "$RTID")
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+
+      - name: Build for simulator
+        run: |
+          set -o pipefail
+          SDK=$(xcrun --sdk iphonesimulator --show-sdk-version)
+          if [ "$(printf '%s\n' "27.1" "$SDK" | sort -V | head -1)" = "27.1" ]; then
+            DUO_OVERRIDE=""
+          else
+            DUO_OVERRIDE="SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG"
+          fi
+          xcodebuild build \
+            -project DuoStudio/DuoStudio.xcodeproj \
+            -scheme DuoStudio \
+            -destination "id=$UDID" \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            $DUO_OVERRIDE | tail -50
+
+      - name: Install, launch and screenshot
+        run: |
+          mkdir -p shots
+          B=tech.kioh.duostudio
+          xcrun simctl install "$UDID" build/Build/Products/Debug-iphonesimulator/DuoStudio.app
+          for s in camera microphone photos-add; do
+            xcrun simctl privacy "$UDID" grant $s $B || true
+          done
+
+          # shot <name> <launch args...>: launch, wait, screenshot, crash check, terminate.
+          shot() {
+            name=$1; shift
+            xcrun simctl launch "$UDID" $B "$@" || echo "launch failed: $name" >> shots/crashes.txt
+            sleep "${WAIT:-10}"
+            if ! xcrun simctl spawn "$UDID" launchctl list | grep -q "$B"; then
+              echo "NOT RUNNING after launch: $name" >> shots/crashes.txt
+            fi
+            xcrun simctl io "$UDID" screenshot "shots/$name.png" || true
+            xcrun simctl terminate "$UDID" $B || true
+          }
+
+          WAIT=6 shot 01-onboarding-studio -hasOnboarded NO -skin studio
+          for skin in studio mono vintage modern pop; do
+            for mode in pose dance; do
+              shot "$skin-$mode" -hasOnboarded YES -skin $skin -studioMode $mode
+            done
+          done
+          shot studio-interview -hasOnboarded YES -skin studio -studioMode interview
+          shot studio-script -hasOnboarded YES -skin studio -studioMode script
+
+          xcrun simctl spawn "$UDID" log show --last 5m --predicate 'process == "DuoStudio"' --style compact > shots/app-log.txt || true
+          cp ~/Library/Logs/DiagnosticReports/DuoStudio*.ips shots/ 2>/dev/null || true
+          ls shots/DuoStudio*.ips >/dev/null 2>&1 && echo "crash reports present (.ips)" >> shots/crashes.txt || true
+          [ -f shots/crashes.txt ] && cat shots/crashes.txt || echo "no crashes detected"
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-shots
+          path: shots/
+          if-no-files-found: warn
