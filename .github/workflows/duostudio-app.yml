@@ -45,13 +45,6 @@ jobs:
             echo "::warning::iOS SDK $SDK < 27.1: Duo APIs (sceneAccessory, direction coordinator) are not compiled"
           fi
 
-      - name: Probe SDK (temporary)
-        run: |
-          SDKROOT=$(xcrun --sdk iphonesimulator --show-sdk-path)
-          H="$SDKROOT/System/Library/Frameworks/AVKit.framework/Headers"
-          cat "$H/AVCaptureDeviceDirectionCoordinator.h"
-          grep -n -B3 -A3 "DirectionCoordinator" "$H/AVKit.h"
-
       - name: Install XcodeGen
         run: brew install xcodegen
 
