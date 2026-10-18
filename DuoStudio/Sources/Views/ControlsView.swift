@@ -16,9 +16,9 @@ struct ControlsView: View {
                     section("FILTER") { filterPicker }
                     section("ADJUST") {
                         VStack(alignment: .leading, spacing: Theme.Space.md) {
-                            slider(for: .exposure, range: -2...2, step: 0.3) { model.state.adjustments.exposureEV }
-                            slider(for: .contrast, range: 0.5...1.5, step: 0.1) { model.state.adjustments.contrast }
-                            slider(for: .warmth, range: 3000...8000, step: 250) { model.state.adjustments.warmthKelvin }
+                            slider(for: .exposure, range: -2...2, step: 0.3, value: \.exposureEV)
+                            slider(for: .contrast, range: 0.5...1.5, step: 0.1, value: \.contrast)
+                            slider(for: .warmth, range: 3000...8000, step: 250, value: \.warmthKelvin)
                         }
                     }
                     section("HAND GESTURES") { gestureLegend }
@@ -66,7 +66,8 @@ struct ControlsView: View {
     }
 
     private func slider(
-        for parameter: StudioParameter, range: ClosedRange<Double>, step: Double, get: @escaping @MainActor @Sendable () -> Double
+        for parameter: StudioParameter, range: ClosedRange<Double>, step: Double,
+        value: WritableKeyPath<Adjustments, Double>
     ) -> some View {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             HStack {
@@ -79,7 +80,7 @@ struct ControlsView: View {
                     .font(Theme.TypeFace.readout)
                     .foregroundStyle(Theme.Palette.ink)
             }
-            Slider(value: Binding(get: get, set: { model.setAdjustment(parameter, to: $0) }), in: range, step: step)
+            Slider(value: Binding(get: { model.state.adjustments[keyPath: value] }, set: { model.setAdjustment(parameter, to: $0) }), in: range, step: step)
                 .tint(Theme.Palette.accent)
                 .accessibilityLabel(parameter.rawValue.capitalized)
                 .accessibilityValue(model.state.adjustments.formatted(parameter))
