@@ -11,7 +11,7 @@
 - Test trên iPhone Duo thật sau 23/10/2026. (2026-09-13, máy chưa ra mắt)
 - Khác biệt hoá với tính năng dịch hội thoại sẵn có của Apple: app Translate (chế độ face-to-face) và Live Translation trên AirPods (iOS 26+; AirPods 5 ra mắt 09/09/2026, cần iPhone 15 Pro trở lên, không có ở Trung Quốc đại lục). Điểm khác của Across phải là: không cần tai nghe cho cả hai người, có màn hình đối diện đọc được từ xa, chạy trên iPhone đời cũ hơn. (2026-09-13, cần theo dõi Apple cập nhật)
 - Đề xuất: App Intents cho Siri AI (iOS 27 bỏ SiriKit, Siri chỉ gọi app qua App Intents) — ví dụ "Siri, bắt đầu hội thoại tiếng Anh". (2026-09-13, đề xuất từ Apple event, chưa duyệt)
-- Duo Studio: build & test trên Mac với Xcode 27.1 beta + Duo simulator — code viết trên Windows, chưa compile lần nào. (2026-09-20, chưa có Mac/Xcode 27.1 để verify)
+- Duo Studio: build với iOS 27.1 SDK (bật `DUO_SCENE_ACCESSORY` + `DUO_DIRECTION_COORDINATOR`) và chạy thử trên Duo simulator / máy thật — đã build xanh trên GitHub Actions với Xcode 26.6 / iOS 26.5 SDK (API Duo bị tắt), PoseCore 49 test pass; phần API Duo 27.x chưa compile lần nào vì runner chưa có Xcode 27.1. (2026-10-18)
 - Duo Studio: kiểm tra độ chính xác nhận diện cử chỉ tay (swipe/pinch/fist/point) ở khoảng cách 2–3 m trên thiết bị thật — rule-based classifier viết trên Windows chưa test với dữ liệu Vision thật. (2026-09-20, cần thiết bị thật + iOS 27.1)
 - Duo Studio: dùng `reservedRegions` để layout màn trong (thanh top bar, template strip, shutter) tránh dải bản lề, thay vì giả định không có vật cản. (2026-09-20, chờ Xcode 27.1 beta)
 - Duo Studio: pose template tuỳ chỉnh hiện chỉ lưu UserDefaults — cân nhắc export/share giữa các máy hoặc iCloud sync. (2026-09-20, MVP dùng UserDefaults cho đơn giản)
