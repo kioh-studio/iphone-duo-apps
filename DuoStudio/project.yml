@@ -15,10 +15,11 @@
 # still nested inside `if #available(iOS 27.1, *)`, so non-Duo/pre-27.1 devices always fall back to
 # the classic wide-angle front/back cameras.
 #
-# Building with Xcode 26 (iOS 26 SDK) instead of 27.1: remove `DUO_DIRECTION_COORDINATOR` from
-# `SWIFT_ACTIVE_COMPILATION_CONDITIONS` below AND the `sceneAccessory`/`CameraCaptureAccessory`
-# usage in `Sources/Views/OuterDisplayAccessory.swift` — both are 27.x-only APIs and Xcode 26 can't
-# even parse them behind `#if`/`#available` alone (the symbols themselves don't exist in that SDK).
+# Building with Xcode 26 (iOS 26 SDK) instead of 27.1: drop both `DUO_DIRECTION_COORDINATOR` and
+# `DUO_SCENE_ACCESSORY` (guarding `AVCaptureDeviceDirectionCoordinator` and `sceneAccessory`/
+# `CameraCaptureAccessory`) — no source edits needed, e.g.
+# `xcodebuild ... SWIFT_ACTIVE_COMPILATION_CONDITIONS='$(inherited)'`. Those 27.x symbols don't exist
+# in the Xcode 26 SDK, so `#available` alone can't hide them.
 #
 # UNVERIFIED (2026-09-20): written on Windows with no Xcode/xcodegen toolchain to verify against —
 # confirm on a Mac that `xcodegen generate` produces a working project and that it builds & runs.
@@ -54,7 +55,7 @@ targets:
         IPHONEOS_DEPLOYMENT_TARGET: "26.0"
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
-        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) DUO_DIRECTION_COORDINATOR"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) DUO_DIRECTION_COORDINATOR DUO_SCENE_ACCESSORY"
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

@@ -98,3 +98,10 @@ Look at these two files first — they're where the 27.x-only APIs live:
 
 - `Sources/Views/OuterDisplayAccessory.swift`
 - `Sources/Views/CameraDirectionAnchor.swift`
+
+## CI
+
+`.github/workflows/duostudio-app.yml` builds the app for the iOS Simulator on a macOS runner
+(manual or on push to `duo-studio`/`main`). If the runner's iOS SDK is older than 27.1 it drops
+`DUO_DIRECTION_COORDINATOR` and `DUO_SCENE_ACCESSORY` (with a warning), so it only proves the
+non-Duo path compiles; the Duo code still needs Xcode 27.1 on a Mac.

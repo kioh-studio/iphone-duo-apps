@@ -1,0 +1,65 @@
+name: DuoStudio app
+
+on:
+  # Repo is private, so macOS runner minutes burn the free quota at 10x — only
+  # run push builds when the app, its core package or this workflow changes.
+  push:
+    branches: ["duo-studio", "main"]
+    paths:
+      - "DuoStudio/Sources/**"
+      - "DuoStudio/Resources/**"
+      - "DuoStudio/project.yml"
+      - "DuoStudio/PoseCore/**"
+      - ".github/workflows/duostudio-app.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build DuoStudio (iOS Simulator)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Pick Duo compilation flags from SDK version
+        run: |
+          SDK=$(xcrun --sdk iphonesimulator --show-sdk-version)
+          echo "iOS Simulator SDK: $SDK"
+          if [ "$(printf '%s\n' "27.1" "$SDK" | sort -V | head -1)" = "27.1" ]; then
+            FLAGS='$(inherited) DUO_DIRECTION_COORDINATOR DUO_SCENE_ACCESSORY'
+          else
+            FLAGS='$(inherited)'
+            echo "::warning::iOS SDK $SDK < 27.1: Duo APIs (sceneAccessory, direction coordinator) are not compiled"
+          fi
+          echo "FLAGS=$FLAGS" >> "$GITHUB_ENV"
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: cd DuoStudio && xcodegen generate
+
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project DuoStudio/DuoStudio.xcodeproj \
+            -scheme DuoStudio \
+            -destination 'generic/platform=iOS Simulator' \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_ACTIVE_COMPILATION_CONDITIONS="$FLAGS" | tee build.log
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
