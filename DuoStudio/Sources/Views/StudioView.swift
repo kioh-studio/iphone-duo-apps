@@ -172,20 +172,30 @@ struct StudioView: View {
     /// Outer / Gestures / Solo toggles, then the MATCH or REC readout and the Skin button - each on
     /// a `scrim` capsule with `overlayInk`, since they sit on live video.
     private var topBar: some View {
+        // Labelled chips when they fit, icon-only (same accessibility labels) on narrow widths.
+        ViewThatFits(in: .horizontal) {
+            topBarRow(labelled: true)
+            topBarRow(labelled: false)
+        }
+        .buttonStyle(PressableStyle())
+        .padding(Theme.Space.sm)
+    }
+
+    private func topBarRow(labelled: Bool) -> some View {
         HStack(spacing: Theme.Space.xs) {
-            toggleChip("Outer", symbol: "rectangle.portrait.on.rectangle.portrait", isOn: model.isOuterEnabled) {
+            toggleChip("Outer", labelled: labelled, symbol: "rectangle.portrait.on.rectangle.portrait", isOn: model.isOuterEnabled) {
                 model.isOuterEnabled.toggle()
             }
             .disabled(!model.isOuterAvailable || model.captureMode == .selfPortrait)
             .opacity(model.isOuterAvailable && model.captureMode == .partner ? 1 : Theme.Opacity.disabled)
             .accessibilityHint(model.isOuterAvailable ? "" : "Not available on this iPhone")
 
-            toggleChip("Gestures", symbol: model.gesturesEnabled ? "hand.raised" : "hand.raised.slash", isOn: model.gesturesEnabled) {
+            toggleChip("Gestures", labelled: labelled, symbol: model.gesturesEnabled ? "hand.raised" : "hand.raised.slash", isOn: model.gesturesEnabled) {
                 model.gesturesEnabled.toggle()
             }
 
             if model.mode.supportsSolo {
-                toggleChip("Solo", symbol: "person.crop.square", isOn: model.isSolo) {
+                toggleChip("Solo", labelled: labelled, symbol: "person.crop.square", isOn: model.isSolo) {
                     model.isSolo.toggle()
                 }
                 .disabled(model.recordingPhase != .idle)
@@ -205,24 +215,30 @@ struct StudioView: View {
             }
             .accessibilityLabel("Change skin")
         }
-        .buttonStyle(PressableStyle())
-        .padding(Theme.Space.sm)
     }
 
-    private func toggleChip(_ title: String, symbol: String, isOn: Bool, action: @escaping () -> Void) -> some View {
+    private func toggleChip(_ title: String, labelled: Bool, symbol: String, isOn: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Label(title, systemImage: symbol)
-                .labelStyle(.titleAndIcon)
+            chipLabel(title, symbol: symbol, labelled: labelled)
                 .font(Theme.TypeFace.label)
                 .lineLimit(1)
-                .minimumScaleFactor(0.7)
+                .fixedSize()
                 .foregroundStyle(isOn ? Theme.Palette.overlayAccent : Theme.Palette.overlayInk)
                 .padding(.horizontal, Theme.Space.sm)
-                .frame(minHeight: Theme.Space.hitTarget)
+                .frame(minWidth: Theme.Space.hitTarget, minHeight: Theme.Space.hitTarget)
                 .background(Theme.Palette.scrim, in: Capsule())
         }
         .accessibilityLabel(title)
         .accessibilityValue(isOn ? "On" : "Off")
+    }
+
+    @ViewBuilder
+    private func chipLabel(_ title: String, symbol: String, labelled: Bool) -> some View {
+        if labelled {
+            Label(title, systemImage: symbol).labelStyle(.titleAndIcon)
+        } else {
+            Label(title, systemImage: symbol).labelStyle(.iconOnly)
+        }
     }
 
     /// `REC 00:12` while recording; otherwise the match % for the modes that score (Pose, Selfie,
@@ -235,6 +251,8 @@ struct StudioView: View {
                     .font(Theme.TypeFace.readout)
                     .foregroundStyle(Theme.Palette.overlayAccent)
                     .monospacedDigit()
+                    .lineLimit(1)
+                    .fixedSize()
                     .readoutCapsule()
             }
         } else if model.mode.scoresMatch {
@@ -246,6 +264,8 @@ struct StudioView: View {
     private var matchReadout: some View {
         HStack(spacing: Theme.Space.xs) {
             Text("MATCH")
+                .lineLimit(1)
+                .fixedSize()
                 .font(Theme.TypeFace.label)
                 .tracking(Theme.TypeFace.labelTracking)
                 .foregroundStyle(Theme.Palette.overlayMuted)
@@ -255,6 +275,8 @@ struct StudioView: View {
                     .font(Theme.TypeFace.readout)
                     .foregroundStyle(Theme.Palette.overlayAccent)
                     .monospacedDigit()
+                    .lineLimit(1)
+                    .fixedSize()
                     .accessibilityValue("\(percent) percent match")
             } else {
                 Text("—")

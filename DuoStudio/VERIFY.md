@@ -107,3 +107,7 @@ Look at these two files first â€” they're where the 27.x-only APIs live:
 non-Duo path compiles; the Duo code still needs Xcode 27.1 on a Mac. For a local Xcode 26 build pass
 `SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG` to `xcodebuild` — not `'$(inherited)'`, which on the command
 line re-inherits the target's DUO_* flags from `project.yml`.
+
+## CI limits
+
+On the GitHub CI simulator runtime, Vision body/hand pose fails with "Missing weights path cnn_human_pose.espresso.weights" (Vision error 9). The live skeleton and match % cannot be checked on CI; they need a local Mac simulator or a device.
