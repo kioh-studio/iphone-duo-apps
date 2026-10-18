@@ -7,7 +7,7 @@ import AVKit
 /// Invisible host view for `AVCaptureDeviceDirectionCoordinator` (AVKit, main-actor isolated),
 /// which needs a real, on-screen `UIView` to reason about which side of the Duo it's on. Placed in
 /// `StudioView`'s background. Everything here is a no-op unless the app is built with the
-/// `DUO_DIRECTION_COORDINATOR` flag (on by default, see `project.yml`) on iOS 27.1+.
+/// `DUO_DIRECTION_COORDINATOR` flag (OFF by default, see `project.yml`: class absent from the Xcode 27.2 beta 2 SDK) on iOS 27.1+.
 struct CameraDirectionAnchor: UIViewRepresentable {
     let model: StudioModel
 
