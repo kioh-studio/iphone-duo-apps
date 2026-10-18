@@ -100,7 +100,7 @@ jobs:
           # Candidates: Duo first, then iPhones newest-first. The Duo type may be incompatible with
           # the installed runtime ("Incompatible device"), so take the first that creates.
           UDID=""
-          for DEV in $( (xcrun simctl list devicetypes | grep -i "Duo"; xcrun simctl list devicetypes | grep "^iPhone" | grep -vi Duo | tac) | sed -E 's/.*\((com\.apple[^)]*)\).*//'); do
+          for DEV in $( (xcrun simctl list devicetypes | grep -i "Duo"; xcrun simctl list devicetypes | grep "^iPhone" | grep -vi Duo | tail -r) | sed -E 's/.*\((com\.apple[^)]*)\).*//'); do
             if UDID=$(xcrun simctl create smoke "$DEV" "$RTID"); then
               echo "Device type used: $DEV"
               break
