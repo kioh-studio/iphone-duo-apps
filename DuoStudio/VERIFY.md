@@ -104,4 +104,6 @@ Look at these two files first â€” they're where the 27.x-only APIs live:
 `.github/workflows/duostudio-app.yml` builds the app for the iOS Simulator on a macOS runner
 (manual or on push to `duo-studio`/`main`). If the runner's iOS SDK is older than 27.1 it drops
 `DUO_DIRECTION_COORDINATOR` and `DUO_SCENE_ACCESSORY` (with a warning), so it only proves the
-non-Duo path compiles; the Duo code still needs Xcode 27.1 on a Mac.
+non-Duo path compiles; the Duo code still needs Xcode 27.1 on a Mac. For a local Xcode 26 build pass
+`SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG` to `xcodebuild` — not `'$(inherited)'`, which on the command
+line re-inherits the target's DUO_* flags from `project.yml`.

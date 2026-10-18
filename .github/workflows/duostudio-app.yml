@@ -32,13 +32,14 @@ jobs:
         run: |
           SDK=$(xcrun --sdk iphonesimulator --show-sdk-version)
           echo "iOS Simulator SDK: $SDK"
+          # A command-line `SWIFT_ACTIVE_COMPILATION_CONDITIONS='$(inherited)'` re-inherits the
+          # target-level DUO_* flags from project.yml, so the override must be a plain value.
           if [ "$(printf '%s\n' "27.1" "$SDK" | sort -V | head -1)" = "27.1" ]; then
-            FLAGS='$(inherited) DUO_DIRECTION_COORDINATOR DUO_SCENE_ACCESSORY'
+            echo "DUO_OVERRIDE=" >> "$GITHUB_ENV"
           else
-            FLAGS='$(inherited)'
+            echo "DUO_OVERRIDE=SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG" >> "$GITHUB_ENV"
             echo "::warning::iOS SDK $SDK < 27.1: Duo APIs (sceneAccessory, direction coordinator) are not compiled"
           fi
-          echo "FLAGS=$FLAGS" >> "$GITHUB_ENV"
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -55,7 +56,7 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             -configuration Debug \
             CODE_SIGNING_ALLOWED=NO \
-            SWIFT_ACTIVE_COMPILATION_CONDITIONS="$FLAGS" | tee build.log
+            $DUO_OVERRIDE | tee build.log
 
       - name: Upload build log
         if: failure()

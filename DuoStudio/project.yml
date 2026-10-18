@@ -18,8 +18,9 @@
 # Building with Xcode 26 (iOS 26 SDK) instead of 27.1: drop both `DUO_DIRECTION_COORDINATOR` and
 # `DUO_SCENE_ACCESSORY` (guarding `AVCaptureDeviceDirectionCoordinator` and `sceneAccessory`/
 # `CameraCaptureAccessory`) — no source edits needed, e.g.
-# `xcodebuild ... SWIFT_ACTIVE_COMPILATION_CONDITIONS='$(inherited)'`. Those 27.x symbols don't exist
-# in the Xcode 26 SDK, so `#available` alone can't hide them.
+# `xcodebuild ... SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG` (not `'$(inherited)'`: on the command
+# line that re-inherits this target's DUO_* flags). Those 27.x symbols don't exist in the Xcode 26 SDK,
+# so `#available` alone can't hide them.
 #
 # UNVERIFIED (2026-09-20): written on Windows with no Xcode/xcodegen toolchain to verify against —
 # confirm on a Mac that `xcodegen generate` produces a working project and that it builds & runs.
