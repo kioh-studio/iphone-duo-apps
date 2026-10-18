@@ -1,5 +1,7 @@
 import CoreTransferable
 import Foundation
+import PhotosUI
+import SwiftUI
 import UniformTypeIdentifiers
 
 /// What `PhotosPicker` hands back for a chosen video: a temp-file copy we own. The picker's own
@@ -20,5 +22,17 @@ struct PickedMovie: Transferable {
             try FileManager.default.copyItem(at: received.file, to: copy)
             return PickedMovie(url: copy)
         }
+    }
+}
+
+// Lives in the view layer so the model stays free of PhotosUI/SwiftUI.
+extension StudioModel {
+    /// A video chosen in `PhotosPicker`: loads it to a temp copy (`PickedMovie`), then imports it.
+    func importPickedVideo(_ item: PhotosPickerItem) async {
+        guard let movie = try? await item.loadTransferable(type: PickedMovie.self) else {
+            errorMessage = "Couldn't import that video."
+            return
+        }
+        await importRoutine(from: movie.url)
     }
 }

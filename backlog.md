@@ -33,7 +33,6 @@
 - Duo Studio video: độ chính xác ghost/điểm số với vũ đạo nhanh — lấy mẫu 10 fps là trần; thử 15–20 fps hoặc làm mượt khi có thiết bị. (2026-10-18)
 - Duo Studio video: nếu app bị đẩy xuống nền giữa lúc lưu video (stopRecordingIfNeeded) thì việc lưu/mux có thể bị hệ thống ngắt — cân nhắc `beginBackgroundTask`. (2026-10-18, chưa test trên máy thật)
 - Duo Studio video: đo độ lệch nhạc/hình thực tế trên máy sau khi đã preroll, thêm calibration knob nếu nghe được. (2026-10-18, chỉ đo được trên thiết bị)
-- Duo Studio: `StudioModel` import PhotosUI cho `PhotosPickerItem` — chuyển code load từ picker sang view layer nếu model cần sạch UI framework. (2026-10-18)
 - Duo Studio interview: hiển thị câu hỏi hiện tại cho khách trên màn ngoài (tuỳ chọn). (2026-10-18, spec v1 chỉ hiện câu hỏi cho người phỏng vấn ở màn trong)
 - Duo Studio interview: thêm layout khác ngoài split trên/dưới — PiP, hoán đổi hai nửa. (2026-10-18, ngoài scope v1)
 - Duo Studio interview: hạ `activeFormat` để giữ chế độ dual trên nhiều máy hơn khi `hardwareCost > 1.0` (hiện rơi về chỉ quay khách). (2026-10-18, cần đo trên máy thật)

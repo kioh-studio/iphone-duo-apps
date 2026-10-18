@@ -2,7 +2,6 @@ import AVFoundation
 import CoreGraphics
 import Foundation
 import Observation
-import PhotosUI
 import PoseCore
 
 /// Which physical camera the session should use.
@@ -931,15 +930,6 @@ final class StudioModel {
     }
 
     // MARK: - Routines
-
-    /// A video chosen in `PhotosPicker`: loads it to a temp copy (`PickedMovie`), then imports it.
-    func importPickedVideo(_ item: PhotosPickerItem) async {
-        guard let movie = try? await item.loadTransferable(type: PickedMovie.self) else {
-            errorMessage = "Couldn't import that video."
-            return
-        }
-        await importRoutine(from: movie.url)
-    }
 
     /// Imports a reference dance video (a temp copy made by the picker - deleted afterwards) into
     /// a routine: skeleton timeline sampled on-device, video kept for playback and its music.
