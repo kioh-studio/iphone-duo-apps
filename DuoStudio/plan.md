@@ -202,6 +202,8 @@ for migration).
 
 ### `DUO_DIRECTION_COORDINATOR` flag
 
+**Currently OFF by default.** `AVCaptureDeviceDirectionCoordinator` isn't in the Xcode 27.2 beta 2 SDK (the header is empty), so partner and self-portrait modes use the classic wide back/front camera fallback until the class ships. The text below describes the intended behaviour once it is re-enabled.
+
 `AVCaptureDeviceDirectionCoordinator` (AVKit, main-actor isolated) needs a live `UIView` to reason
 about which side of the Duo it's on, so it can't live inside `CameraService` (which owns no view).
 `Sources/Views/CameraDirectionAnchor.swift` is an invisible `UIViewRepresentable` placed in
@@ -415,6 +417,8 @@ group in `project.yml`, so XcodeGen picks it up as a plain resource alongside `I
 
 ## Verification status
 
+CI: the app builds green on GitHub Actions with Xcode 26.6 (Duo APIs off) and Xcode 27.2 beta 2 (scene accessory on).
+
 Rows below marked **confirmed against published docs (2026-09-20)** have had their Swift API
 signatures checked against Apple's developer documentation. That confirms the shape of the call —
 it does not confirm real-hardware/Duo-simulator *behavior*, which stays unverified until this runs
@@ -423,8 +427,8 @@ no Mac/Xcode/Swift toolchain was available to compile or run any of this.
 
 | API | Used for | Status | Source |
 |---|---|---|---|
-| `View.sceneAccessory(content:)`, `SceneAccessoryContent.onAvailabilityChange(perform:)` | Outer display in Partner mode | Confirmed against published docs (2026-09-20) — real-hardware/simulator behavior still unverified | https://developer.apple.com/documentation/swiftui/view/sceneaccessory(content:) |
-| `CameraCaptureAccessory<Content>` (`init(content:)`, `init(isEnabled:content:)`) | Outer display in Partner mode | Confirmed against published docs (2026-09-20) — real-hardware/simulator behavior still unverified | https://developer.apple.com/documentation/swiftui/cameracaptureaccessory |
+| `View.sceneAccessory(content:)`, `SceneAccessoryContent.onAvailabilityChange(perform:)` | Outer display in Partner mode | Compiles with Xcode 27.2 beta 2 (CI, 2026-10-18); runtime behaviour on Duo unverified | https://developer.apple.com/documentation/swiftui/view/sceneaccessory(content:) |
+| `CameraCaptureAccessory<Content>` (`init(content:)`, `init(isEnabled:content:)`) | Outer display in Partner mode | Compiles with Xcode 27.2 beta 2 (CI, 2026-10-18); runtime behaviour on Duo unverified | https://developer.apple.com/documentation/swiftui/cameracaptureaccessory |
 | `AVCaptureDeviceDirectionCoordinator(view:deviceTypes:changeHandler:)`, `deviceDirections`, `AVCaptureDeviceDirectionMap.forwardFacingDeviceDescriptors`/`backwardFacingDeviceDescriptors`, `AVCaptureDeviceDescriptor.uniqueID` | Picking the subject-facing (Partner) or user-facing (self-portrait) camera on the Duo; `deviceDirections` is also read once right after creating the coordinator so the initial pick doesn't wait for the first `changeHandler` call | compiles with Xcode 27.2 beta 2 (CI) ONLY with the flag off: with it on, `cannot find 'AVCaptureDeviceDirectionCoordinator' in scope` (SDK header `AVKit.framework/Headers/AVCaptureDeviceDirectionCoordinator.h` is an empty stub, 2026-10-18), so `DUO_DIRECTION_COORDINATOR` is now OFF by default (camera falls back to wide front/back). Re-enable when an SDK ships the class; shape originally from published docs, still unverified. | https://developer.apple.com/documentation/avkit/avcapturedevicedirectioncoordinator |
 | `AVCaptureDevice.RotationCoordinator(device:previewLayer:)`, `videoRotationAngleForHorizonLevelCapture`, `AVCaptureConnection.videoRotationAngle`/`isVideoMirrored` | Upright, un-mirrored live preview + horizon-correct photo capture | Unverified — documented iOS 17+ API, but exact behavior on Duo hardware not checked from Windows | Not checked from Windows |
 | Camera-only dual-display behavior; outer display takes no touch | Confirms the non-interactive `SubjectView` design and that only `CameraCaptureAccessory` (not a general window) targets the outer display | Unverified — third-party notes, not Apple docs | Group Labs Q&A — https://gist.github.com/frankschlegel/6356a059426b2393528691822edfdae6 |

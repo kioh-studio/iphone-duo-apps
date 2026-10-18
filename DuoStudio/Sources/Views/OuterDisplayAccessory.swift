@@ -8,7 +8,8 @@ import SwiftUI
 /// main screen already shows the same content there), so this modifier doesn't need to know which
 /// mode is active — it just reflects `isOuterEnabled`/`isOuterAvailable`.
 ///
-/// Confirmed against Apple's published docs (2026-09-20):
+/// Compiled with Xcode 27.2 beta 2 (CI, 2026-10-18); runtime behaviour on Duo still unverified.
+/// API docs:
 /// https://developer.apple.com/documentation/swiftui/view/sceneaccessory(content:) and
 /// https://developer.apple.com/documentation/swiftui/cameracaptureaccessory
 struct OuterDisplayAccessory: ViewModifier {

@@ -11,7 +11,7 @@
 - Test trên iPhone Duo thật sau 23/10/2026. (2026-09-13, máy chưa ra mắt)
 - Khác biệt hoá với tính năng dịch hội thoại sẵn có của Apple: app Translate (chế độ face-to-face) và Live Translation trên AirPods (iOS 26+; AirPods 5 ra mắt 09/09/2026, cần iPhone 15 Pro trở lên, không có ở Trung Quốc đại lục). Điểm khác của Across phải là: không cần tai nghe cho cả hai người, có màn hình đối diện đọc được từ xa, chạy trên iPhone đời cũ hơn. (2026-09-13, cần theo dõi Apple cập nhật)
 - Đề xuất: App Intents cho Siri AI (iOS 27 bỏ SiriKit, Siri chỉ gọi app qua App Intents) — ví dụ "Siri, bắt đầu hội thoại tiếng Anh". (2026-09-13, đề xuất từ Apple event, chưa duyệt)
-- Duo Studio: build với iOS 27.1 SDK (bật `DUO_SCENE_ACCESSORY` + `DUO_DIRECTION_COORDINATOR`) và chạy thử trên Duo simulator / máy thật — đã build xanh trên GitHub Actions với Xcode 26.6 / iOS 26.5 SDK (API Duo bị tắt), PoseCore 49 test pass; phần API Duo 27.x chưa compile lần nào vì runner chưa có Xcode 27.1. (2026-10-18)
+- Duo Studio: chạy thử trên Duo simulator / máy thật — scene accessory (`DUO_SCENE_ACCESSORY`) đã compile xanh trên CI Xcode 27.2 beta 2, và build xanh với Xcode 26.6 / iOS 26.5 SDK (API Duo tắt), PoseCore 49 test pass; còn lại là hành vi runtime trên Duo. (2026-10-18)
 - Duo Studio: kiểm tra độ chính xác nhận diện cử chỉ tay (swipe/pinch/fist/point) ở khoảng cách 2–3 m trên thiết bị thật — rule-based classifier viết trên Windows chưa test với dữ liệu Vision thật. (2026-09-20, cần thiết bị thật + iOS 27.1)
 - Duo Studio: dùng `reservedRegions` để layout màn trong (thanh top bar, template strip, shutter) tránh dải bản lề, thay vì giả định không có vật cản. (2026-09-20, chờ Xcode 27.1 beta)
 - Duo Studio: pose template tuỳ chỉnh hiện chỉ lưu UserDefaults — cân nhắc export/share giữa các máy hoặc iCloud sync. (2026-09-20, MVP dùng UserDefaults cho đơn giản)
@@ -41,3 +41,4 @@
 - Duo Studio: nút Share trên sheet "Saved to Photos" (file tạm đã bị xoá sau khi lưu — cần giữ file hoặc share từ PHAsset). (2026-10-18)
 - Duo Studio: font tuỳ biến theo skin (hiện chỉ dùng system font design) — cần anh Khôi duyệt vì là asset bên thứ ba. (2026-10-18)
 - Duo Studio: kiểm tra lại độ tương phản của từng skin trên máy thật (nhất là Vintage/Modern trên video, top bar nhiều chip trên iPhone màn nhỏ). (2026-10-18, chỉ đo được trên thiết bị)
+- Duo Studio: bật lại `DUO_DIRECTION_COORDINATOR` khi SDK có `AVCaptureDeviceDirectionCoordinator` thật (Xcode 27.2 beta 2 chỉ có header rỗng) — hiện chọn camera bằng fallback wide trước/sau, nên trên Duo có thể chọn sai camera theo tư thế gập. (2026-10-18)
