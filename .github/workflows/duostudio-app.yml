@@ -15,8 +15,12 @@ on:
 
 jobs:
   build:
-    name: Build DuoStudio (iOS Simulator)
-    runs-on: macos-latest
+    name: Build (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-latest, xcode-27]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -62,5 +66,5 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
+          name: build-log-${{ matrix.runner }}
           path: build.log
