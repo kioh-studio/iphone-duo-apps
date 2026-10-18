@@ -48,8 +48,9 @@ jobs:
       - name: Probe SDK (temporary)
         run: |
           SDKROOT=$(xcrun --sdk iphonesimulator --show-sdk-path)
-          grep -rIl "DirectionCoordinator\|DeviceDirection" "$SDKROOT/System/Library/Frameworks" 2>/dev/null | head -20
-          grep -rIh "DirectionCoordinator\|DeviceDirection\|DeviceDescriptor" "$SDKROOT/System/Library/Frameworks" --include=*.h --include=*.swiftinterface 2>/dev/null | sort -u | head -80
+          H="$SDKROOT/System/Library/Frameworks/AVKit.framework/Headers"
+          cat "$H/AVCaptureDeviceDirectionCoordinator.h"
+          grep -n -B3 -A3 "DirectionCoordinator" "$H/AVKit.h"
 
       - name: Install XcodeGen
         run: brew install xcodegen
