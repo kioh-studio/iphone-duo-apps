@@ -435,8 +435,9 @@ final class StudioModel {
         interviewQuestionsText = defaults.string(forKey: Self.interviewQuestionsKey) ?? ""
         let savedSpeed = defaults.object(forKey: Self.scriptSpeedKey) as? Double ?? 40
         scriptSpeed = min(max(savedSpeed, Self.scriptSpeedRange.lowerBound), Self.scriptSpeedRange.upperBound)
-        routines = RoutineStore.load()
-        selectedRoutineID = routines.first?.id
+        let loadedRoutines = RoutineStore.load()
+        routines = loadedRoutines
+        selectedRoutineID = loadedRoutines.first?.id
 
         #if targetEnvironment(simulator)
         let source = SimulatedFrameSource()
